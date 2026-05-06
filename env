@@ -1,0 +1,43 @@
+#--------------------------------------------------------------------
+# SkyNet-SIA — Variables de entorno
+# Copia este archivo como .env y ajusta los valores
+#--------------------------------------------------------------------
+
+# ── Entorno ─────────────────────────────────────────────────────────
+CI_ENVIRONMENT = development
+# CI_ENVIRONMENT = production
+
+# ── App ─────────────────────────────────────────────────────────────
+app.baseURL      = 'http://localhost:8080/'
+APP_BASEURL      = 'SkyNet-SIA'
+app.forceGlobalSecureRequests = false
+
+# ── Base de datos ────────────────────────────────────────────────────
+database.default.hostname = 208.109.18.74
+database.default.database = RecursosHumanos
+database.default.username = seterRh
+database.default.password = e+$NEP%nw5Rf
+database.default.DBDriver = MySQLi
+database.default.DBPrefix =
+database.default.port     = 3306
+database.default.charset  = utf8mb4
+database.default.DBCollat = utf8mb4_unicode_ci
+
+# ── JWT ──────────────────────────────────────────────────────────────
+# Genera uno seguro con: openssl rand -base64 64
+
+# JWT_SECRET = KY2HEFvbYaJCjm94BJB9fAtfWe1eMcMpcAk3SWkWt3dPCclhu2tHAErxknGDoPmJGQEgiZ5wQJMMC22o8kE+Wg==
+JWT_SECRET=zT9wU!5vYp@34Fk#LsP1eB^dWc@R7xQn
+
+# Access token TTL en segundos (default: 900 = 15 min)
+JWT_ACCESS_TTL  = 900
+
+# Refresh token TTL en segundos (default: 604800 = 7 días)
+JWT_REFRESH_TTL = 604800
+
+# ── API Key (biométrico) ─────────────────────────────────────────────
+# La misma que usaba el auth.php legacy
+API_KEY = k8sd7f9a2v1b4mzqp0xlj5ngtu3wrceh
+
+# ── Logs ─────────────────────────────────────────────────────────────
+logger.threshold = 4

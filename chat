@@ -1,0 +1,16 @@
+Estamos migrando el sistema SIA a CI4. Proyecto: SIA-api. Entorno: XAMPP local, MariaDB, base RecursosHumanos.
+
+✅ BACKEND 100% LISTO Y FUNCIONANDO:
+- 87 endpoints en /api/v1/
+- Página de bienvenida en localhost/SIA-api/public/
+- 8 controladores, 10 modelos, 2 librerías, 2 filtros, 8 migraciones
+- JWT con access token 15min + refresh 7 días con rotación
+- Audit log completo en cada acción
+- Archivo SIA-api.http con los 87 requests para VS Code REST Client
+
+⏭️ SIGUIENTE: Frontend Vue 3
+- Vue 3 + Vue Router + Pinia
+- Login con JWT (access + refresh token, rotación automática)
+- Sidebar dinámico según campo "vistas" que devuelve el login
+- Primer módulo: empleados (listado + registro)
+- Backend corre en localhost/SIA-api/public/api/v1 con Bearer token

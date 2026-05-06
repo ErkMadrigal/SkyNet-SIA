@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkyNet-SIA — Sistema Integral Administrativo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0a0c10;
+    --surface:   #111318;
+    --border:    #1e2230;
+    --accent:    #00e5a0;
+    --accent2:   #0066ff;
+    --danger:    #ff4455;
+    --warn:      #ffaa00;
+    --text:      #e8eaf0;
+    --muted:     #5a6080;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Syne', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Grid background ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.4;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ── Glow orb ── */
+  body::after {
+    content: '';
+    position: fixed;
+    top: -200px;
+    right: -200px;
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, rgba(0,229,160,0.08) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+
+  /* ── Header ── */
+  header {
+    padding: 48px 0 40px;
+    display: flex;
+    align-items: flex-start;
+    gap: 24px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 48px;
+    animation: fadeDown 0.6s ease both;
+  }
+
+  .logo-box {
+    width: 52px;
+    height: 52px;
+    border: 1.5px solid var(--accent);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 0 24px rgba(0,229,160,0.2);
+  }
+
+  .logo-box svg { width: 28px; height: 28px; }
+
+  .header-text h1 {
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    line-height: 1;
+  }
+
+  .header-text h1 span { color: var(--accent); }
+
+  .header-text p {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 14px;
+    font-family: var(--mono);
+  }
+
+  .badges {
+    margin-left: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 99px;
+    border: 1px solid;
+  }
+
+  .badge.green  { color: var(--accent);  border-color: var(--accent);  background: rgba(0,229,160,0.06); }
+  .badge.blue   { color: #60a0ff;        border-color: #60a0ff;        background: rgba(0,102,255,0.08); }
+  .badge.gray   { color: var(--muted);   border-color: var(--border);  background: transparent; }
+
+  /* ── Status bar ── */
+  .status-bar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 48px;
+    animation: fadeDown 0.6s 0.1s ease both;
+    flex-wrap: wrap;
+  }
+
+  .stat {
+    flex: 1;
+    min-width: 140px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+
+  .stat-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+
+  .stat-value {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--accent);
+  }
+
+  .stat-sub {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--mono);
+    margin-top: 2px;
+  }
+
+  /* ── Section title ── */
+  .section-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── Endpoint groups ── */
+  .groups {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 48px;
+  }
+
+  .group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    animation: fadeUp 0.5s ease both;
+    transition: border-color 0.2s;
+  }
+
+  .group:hover { border-color: #2a3050; }
+
+  .group-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .group-icon {
+    font-size: 16px;
+    width: 28px;
+    text-align: center;
+  }
+
+  .group-name {
+    font-weight: 700;
+    font-size: 14px;
+    flex: 1;
+  }
+
+  .group-path {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .group-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: rgba(0,229,160,0.08);
+    border: 1px solid rgba(0,229,160,0.2);
+    padding: 2px 8px;
+    border-radius: 99px;
+  }
+
+  .chevron {
+    color: var(--muted);
+    transition: transform 0.25s;
+    font-size: 12px;
+  }
+
+  .group.open .chevron { transform: rotate(90deg); }
+
+  .endpoints {
+    display: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .group.open .endpoints { display: block; }
+
+  .endpoint {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 18px 10px 60px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .endpoint:last-child { border-bottom: none; }
+
+  .method {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    width: 46px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .method.GET    { background: rgba(0,229,160,0.12); color: var(--accent); }
+  .method.POST   { background: rgba(0,102,255,0.12); color: #60a0ff; }
+  .method.PUT    { background: rgba(255,170,0,0.12); color: var(--warn); }
+  .method.PATCH  { background: rgba(255,170,0,0.08); color: var(--warn); }
+  .method.DELETE { background: rgba(255,68,85,0.12); color: var(--danger); }
+
+  .ep-path {
+    color: var(--text);
+    flex: 1;
+  }
+
+  .ep-path .param { color: #ff9060; }
+
+  .ep-desc {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .auth-badge {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  .auth-badge.pub  { background: rgba(0,229,160,0.1);  color: var(--accent);  border: 1px solid rgba(0,229,160,0.2); }
+  .auth-badge.jwt  { background: rgba(0,102,255,0.1);  color: #60a0ff;        border: 1px solid rgba(0,102,255,0.2); }
+  .auth-badge.adm  { background: rgba(255,170,0,0.1);  color: var(--warn);    border: 1px solid rgba(255,170,0,0.2); }
+  .auth-badge.sup  { background: rgba(255,68,85,0.1);  color: var(--danger);  border: 1px solid rgba(255,68,85,0.2); }
+
+  /* ── Quick start ── */
+  .quickstart {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 48px;
+    animation: fadeUp 0.5s 0.3s ease both;
+  }
+
+  .code-block {
+    background: #0d0f14;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-top: 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.8;
+    overflow-x: auto;
+  }
+
+  .code-block .c  { color: var(--muted); }
+  .code-block .k  { color: #60a0ff; }
+  .code-block .s  { color: #ffcc80; }
+  .code-block .v  { color: var(--accent); }
+  .code-block .u  { color: #ff9060; }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    animation: fadeUp 0.5s 0.4s ease both;
+  }
+
+  .pulse {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,229,160,0.4); }
+    50%       { opacity: 0.8; box-shadow: 0 0 0 5px rgba(0,229,160,0); }
+  }
+
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .group:nth-child(1) { animation-delay: 0.10s; }
+  .group:nth-child(2) { animation-delay: 0.15s; }
+  .group:nth-child(3) { animation-delay: 0.20s; }
+  .group:nth-child(4) { animation-delay: 0.25s; }
+  .group:nth-child(5) { animation-delay: 0.28s; }
+  .group:nth-child(6) { animation-delay: 0.31s; }
+  .group:nth-child(7) { animation-delay: 0.34s; }
+  .group:nth-child(8) { animation-delay: 0.37s; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header -->
+  <header>
+    <div class="logo-box">
+      <svg viewBox="0 0 28 28" fill="none">
+        <rect x="2" y="2" width="10" height="10" rx="2" fill="#00e5a0"/>
+        <rect x="16" y="2" width="10" height="10" rx="2" fill="#00e5a0" opacity=".4"/>
+        <rect x="2" y="16" width="10" height="10" rx="2" fill="#00e5a0" opacity=".4"/>
+        <rect x="16" y="16" width="10" height="10" rx="2" fill="#00e5a0"/>
+      </svg>
+    </div>
+    <div class="header-text">
+      <h1>SkyNet<span>-SIA</span></h1>
+      <p>Sistema Integral Administrativo · REST API v1</p>
+    </div>
+    <div class="badges">
+      <span class="badge green">● Online</span>
+      <span class="badge blue">CI4 4.7.2</span>
+      <span class="badge gray">PHP 8.2</span>
+    </div>
+  </header>
+
+  <!-- Stats -->
+  <div class="status-bar">
+    <div class="stat">
+      <div class="stat-label">Endpoints</div>
+      <div class="stat-value">87</div>
+      <div class="stat-sub">rutas registradas</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Módulos</div>
+      <div class="stat-value">9</div>
+      <div class="stat-sub">auth · emp · bio · inc · rep · cat · hosp · usr · tab</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Seguridad</div>
+      <div class="stat-value" style="font-size:15px;padding-top:4px;">JWT</div>
+      <div class="stat-sub">Argon2id · access 15min · refresh 7d</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Base URL</div>
+      <div class="stat-value" style="font-size:13px; padding-top:6px; font-family:'JetBrains Mono',monospace;">/api/v1</div>
+      <div class="stat-sub">prefijo de todos los endpoints</div>
+    </div>
+  </div>
+
+  <!-- Endpoints -->
+  <div class="section-title">Módulos y endpoints</div>
+
+  <div class="groups" id="groups">
+
+    <!-- AUTH -->
+    <div class="group open">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">🔐</span>
+        <span class="group-name">Auth</span>
+        <span class="group-path">/api/v1/auth</span>
+        <span class="group-count">8 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/api/ping</span><span class="ep-desc">Health check</span><span class="auth-badge pub">público</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/login</span><span class="ep-desc">Login sistema web</span><span class="auth-badge pub">público</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/refresh</span><span class="ep-desc">Renovar access token</span><span class="auth-badge pub">público</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/auth/me</span><span class="ep-desc">Datos del usuario actual</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/logout</span><span class="ep-desc">Cerrar sesión actual</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/logout-all</span><span class="ep-desc">Cerrar todas las sesiones</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/registro</span><span class="ep-desc">Registrar usuario del sistema</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/biometrico/buscar</span><span class="ep-desc">Buscar guardia (API Key)</span><span class="auth-badge pub">api-key</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/auth/biometrico/login</span><span class="ep-desc">Login biométrico (API Key)</span><span class="auth-badge pub">api-key</span></div>
+      </div>
+    </div>
+
+    <!-- EMPLEADOS -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">👷</span>
+        <span class="group-name">Empleados</span>
+        <span class="group-path">/api/v1/empleados</span>
+        <span class="group-count">13 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/empleados</span><span class="ep-desc">Listar paginado</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/empleados/<span class="param">:id</span></span><span class="ep-desc">Detalle con catálogos</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/empleados/buscar</span><span class="ep-desc">Búsqueda full-text</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/empleados/dashboard</span><span class="ep-desc">Conteos y estadísticas</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/empleados/alertas</span><span class="ep-desc">Incidencias + perfiles incompletos</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/empleados/nomina/<span class="param">:id</span></span><span class="ep-desc">Nómina por periodo</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/empleados</span><span class="ep-desc">Registrar empleado</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/empleados/masivo</span><span class="ep-desc">Carga masiva con validación</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method PUT">PUT</span><span class="ep-path">/empleados/<span class="param">:id</span></span><span class="ep-desc">Actualizar (personal/trabajo/banco)</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/empleados/<span class="param">:id</span>/foto</span><span class="ep-desc">Subir foto de perfil</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/empleados/baja-masiva</span><span class="ep-desc">Baja masiva</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/empleados/<span class="param">:id</span>/baja</span><span class="ep-desc">Dar de baja</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/empleados/<span class="param">:id</span>/baja-accion</span><span class="ep-desc">Reingreso / Reactivación</span><span class="auth-badge adm">admin</span></div>
+      </div>
+    </div>
+
+    <!-- BIOMÉTRICO -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">📡</span>
+        <span class="group-name">Biométrico</span>
+        <span class="group-path">/api/v1/biometrico</span>
+        <span class="group-count">5 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/biometrico/buscar</span><span class="ep-desc">Buscar guardia entrada/salida</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/biometrico/registro</span><span class="ep-desc">Registrar entrada o salida</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/biometrico/qr/generar</span><span class="ep-desc">Generar token QR (5 min)</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/biometrico/qr/usar</span><span class="ep-desc">Usar token QR (un solo uso)</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/biometrico/registros</span><span class="ep-desc">Historial con búsqueda y fechas</span><span class="auth-badge jwt">jwt</span></div>
+      </div>
+    </div>
+
+    <!-- INCIDENCIAS -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">📋</span>
+        <span class="group-name">Incidencias</span>
+        <span class="group-path">/api/v1/incidencias</span>
+        <span class="group-count">3 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/incidencias</span><span class="ep-desc">Listar pendientes de aprobación</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/incidencias</span><span class="ep-desc">Crear con comprobante opcional</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/incidencias/<span class="param">:id</span>/aprobar</span><span class="ep-desc">Aprobar o rechazar</span><span class="auth-badge adm">admin</span></div>
+      </div>
+    </div>
+
+    <!-- REPORTES -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">📊</span>
+        <span class="group-name">Reportes · Tabulador</span>
+        <span class="group-path">/api/v1/reportes</span>
+        <span class="group-count">13 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/reportes/altas</span><span class="ep-desc">Altas por periodo</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/reportes/bajas</span><span class="ep-desc">Bajas por periodo</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/reportes/nomina/<span class="param">:id</span></span><span class="ep-desc">Nómina simple de empleado</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/reportes/asistencia</span><span class="ep-desc">Preview 24x24 paginado</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/reportes/prenomina</span><span class="ep-desc">Pre-nómina agrupada por zona</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/tabulador</span><span class="ep-desc">Listar tabuladores</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/tabulador/zonas</span><span class="ep-desc">Catálogo de zonas</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/tabulador/puestos</span><span class="ep-desc">Catálogo de puestos</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/tabulador</span><span class="ep-desc">Crear tabulador</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/tabulador/<span class="param">:id</span></span><span class="ep-desc">Detalle con ítems</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/tabulador/<span class="param">:id</span>/item</span><span class="ep-desc">Upsert ítem (sueldo/bono/desc)</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method DELETE">DELETE</span><span class="ep-path">/tabulador/item/<span class="param">:id</span></span><span class="ep-desc">Deshabilitar ítem</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method PATCH">PATCH</span><span class="ep-path">/tabulador/<span class="param">:id</span>/estatus</span><span class="ep-desc">Cambiar estatus</span><span class="auth-badge adm">admin</span></div>
+      </div>
+    </div>
+
+    <!-- CATÁLOGOS -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">🗂️</span>
+        <span class="group-name">Catálogos</span>
+        <span class="group-path">/api/v1/catalogos</span>
+        <span class="group-count">23 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/tipos</span><span class="ep-desc">Tipos de catálogo</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/<span class="param">:id</span></span><span class="ep-desc">Ítems de un catálogo</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/<span class="param">:id</span>/buscar</span><span class="ep-desc">Buscar por nombre (LIKE)</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/banco/<span class="param">:clabe</span></span><span class="ep-desc">Institución bancaria</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/servicios/select</span><span class="ep-desc">Autocomplete de servicios</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/empresas</span><span class="ep-desc">Listar empresas</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/catalogos/empresas</span><span class="ep-desc">Crear empresa</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method PUT">PUT</span><span class="ep-path">/catalogos/empresas/<span class="param">:id</span></span><span class="ep-desc">Actualizar empresa</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/zonas</span><span class="ep-desc">Listar zonas</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/clientes</span><span class="ep-desc">Listar clientes</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/servicios</span><span class="ep-desc">Listar servicios</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/catalogos/servicios</span><span class="ep-desc">Crear servicio</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/regiones</span><span class="ep-desc">Listar regiones</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/catalogos/areas-geograficas</span><span class="ep-desc">Áreas geográficas</span><span class="auth-badge jwt">jwt</span></div>
+      </div>
+    </div>
+
+    <!-- HOSPITALES -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">🏥</span>
+        <span class="group-name">Hospitales · Inventario</span>
+        <span class="group-path">/api/v1/hospitales</span>
+        <span class="group-count">11 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales</span><span class="ep-desc">Listar hospitales</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales/<span class="param">:id</span></span><span class="ep-desc">Detalle hospital</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales/productos</span><span class="ep-desc">Catálogo de productos</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales/<span class="param">:id</span>/recepciones</span><span class="ep-desc">Entradas de un hospital</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/hospitales/<span class="param">:id</span>/recepciones</span><span class="ep-desc">Registrar entrada</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales/<span class="param">:id</span>/salidas</span><span class="ep-desc">Salidas de un hospital</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/hospitales/<span class="param">:id</span>/salidas</span><span class="ep-desc">Registrar salida (valida stock)</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales/<span class="param">:id</span>/inventario</span><span class="ep-desc">Stock completo del hospital</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/hospitales/<span class="param">:id</span>/inventario/<span class="param">:prod</span></span><span class="ep-desc">Stock de un producto</span><span class="auth-badge jwt">jwt</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/hospitales/<span class="param">:id</span>/asignar-empleado</span><span class="ep-desc">Asignar hospital al usuario</span><span class="auth-badge jwt">jwt</span></div>
+      </div>
+    </div>
+
+    <!-- USUARIOS SISTEMA -->
+    <div class="group">
+      <div class="group-header" onclick="toggle(this)">
+        <span class="group-icon">👤</span>
+        <span class="group-name">Usuarios del sistema</span>
+        <span class="group-path">/api/v1/usuarios</span>
+        <span class="group-count">5 EP</span>
+        <span class="chevron">▶</span>
+      </div>
+      <div class="endpoints">
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/usuarios</span><span class="ep-desc">Listar todos con roles/permisos</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/usuarios/<span class="param">:id</span></span><span class="ep-desc">Detalle con roles_permisos[]</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method GET">GET</span><span class="ep-path">/usuarios/roles</span><span class="ep-desc">Catálogo de roles</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/usuarios</span><span class="ep-desc">Crear (genera username y password)</span><span class="auth-badge adm">admin</span></div>
+        <div class="endpoint"><span class="method POST">POST</span><span class="ep-path">/usuarios/<span class="param">:id</span>/roles</span><span class="ep-desc">Asignar roles y permisos</span><span class="auth-badge adm">admin</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Quick start -->
+  <div class="section-title">Quick start</div>
+  <div class="quickstart">
+    <p style="font-size:13px; color:var(--muted); margin-bottom:4px;">1 · Login → 2 · Usa el <code style="color:var(--accent);font-family:var(--mono)">access_token</code> en cada request</p>
+    <div class="code-block">
+<span class="c"># 1. Login</span>
+<span class="k">POST</span> <span class="u">http://localhost/SkyNet-SIA/public/api/v1/auth/login</span>
+<span class="c">Content-Type: application/json</span>
+
+{ <span class="s">"name_user"</span>: <span class="s">"SuperAdmin"</span>, <span class="s">"password"</span>: <span class="s">"tu_password"</span> }
+
+<span class="c"># Respuesta → tokens.access_token</span>
+
+<span class="c"># 2. Usar el token</span>
+<span class="k">GET</span> <span class="u">http://localhost/SkyNet-SIA/public/api/v1/empleados</span>
+<span class="c">Authorization: Bearer</span> <span class="v">&lt;access_token&gt;</span>
+    </div>
+  </div>
+
+  <!-- Leyenda -->
+  <div class="section-title">Niveles de acceso</div>
+  <div style="display:flex; gap:10px; margin-bottom:48px; flex-wrap:wrap;">
+    <span class="auth-badge pub" style="font-size:12px;padding:5px 14px;">público — sin autenticación</span>
+    <span class="auth-badge pub" style="font-size:12px;padding:5px 14px;">api-key — header X-API-KEY</span>
+    <span class="auth-badge jwt" style="font-size:12px;padding:5px 14px;">jwt — cualquier usuario autenticado</span>
+    <span class="auth-badge adm" style="font-size:12px;padding:5px 14px;">admin — nivel ≤ 2</span>
+    <span class="auth-badge sup" style="font-size:12px;padding:5px 14px;">superadmin — solo nivel 1</span>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <span><span class="pulse"></span>SkyNet-SIA v1.0.0 · CodeIgniter 4.7.2 · PHP 8.2</span>
+    <span id="clock" style="font-family:'JetBrains Mono',monospace;"></span>
+  </footer>
+
+</div>
+
+<script>
+  function toggle(header) {
+    header.parentElement.classList.toggle('open');
+  }
+
+  // Reloj en tiempo real
+  function tick() {
+    const now = new Date();
+    document.getElementById('clock').textContent =
+      now.toLocaleDateString('es-MX') + ' · ' +
+      now.toLocaleTimeString('es-MX');
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>
