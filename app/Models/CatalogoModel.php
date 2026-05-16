@@ -39,7 +39,7 @@ class CatalogoModel extends Model
     {
         try {
             $rows = $this->db->query("
-                SELECT m.id, m.valor, m.descripcion, c.descripcion AS catalogo
+                SELECT m.id, m.valor, m.descripcion, m.status, c.descripcion AS catalogo
                 FROM multicatalogo m
                 LEFT JOIN catalogo c ON m.id_catalogo = c.id
                 WHERE c.id = ?
@@ -499,25 +499,20 @@ class CatalogoModel extends Model
 
         try {
             $limit  = max(1, min(100, $limit));
-            $page   = max(1, $page);
             $offset = ($page - 1) * $limit;
             $like   = '%' . $query . '%';
 
-            $stmt = $this->db->connID->prepare("
+            $rows = $this->db->query("
                 SELECT s.id,
-                    CONCAT(s.servicio,' | ',s.ubicacion,' | ',c.nombre_corto) AS text
+                    CONCAT(s.servicio, ' | ', IFNULL(s.ubicacion,''), ' | ', IFNULL(c.nombre_corto,'')) AS text
                 FROM servicios s
                 LEFT JOIN clientes c ON s.id_cliente = c.id
-                WHERE s.servicio LIKE :q OR s.ubicacion LIKE :q OR c.nombre_corto LIKE :q
+                WHERE s.servicio LIKE ? OR s.ubicacion LIKE ? OR c.nombre_corto LIKE ?
                 ORDER BY s.servicio
-                LIMIT :lim OFFSET :off
-            ");
-            $stmt->bindValue(':q',   $like,   \PDO::PARAM_STR);
-            $stmt->bindValue(':lim', $limit,  \PDO::PARAM_INT);
-            $stmt->bindValue(':off', $offset, \PDO::PARAM_INT);
-            $stmt->execute();
+                LIMIT ? OFFSET ?
+            ", [$like, $like, $like, $limit, $offset])->getResultArray();
 
-            return $this->ok($stmt->fetchAll(\PDO::FETCH_ASSOC));
+            return $this->ok($rows);
         } catch (\Exception $e) { return $this->fail($e->getMessage()); }
     }
 }

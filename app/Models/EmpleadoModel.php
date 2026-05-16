@@ -431,13 +431,13 @@ class EmpleadoModel extends Model
         $where = ctype_digit($query)
             ? "e.id = " . (int)ltrim($query, '0') . " AND e.estatus = 1"
             : (strlen($query) === 18
-                ? "e.curp = '" . $this->db->escapeStr(strtoupper($query)) . "' AND e.estatus = 1"
-                : "e.rfc  = '" . $this->db->escapeStr(strtoupper($query)) . "' AND e.estatus = 1");
+                ? "e.curp = '" . $this->db->escapeLikeString(strtoupper($query)) . "' AND e.estatus = 1"
+                : "e.rfc  = '" . $this->db->escapeLikeString(strtoupper($query)) . "' AND e.estatus = 1");
 
         $row = $this->db->query("
             SELECT e.id, CONCAT(e.nombre,' ',e.paterno,' ',e.materno) AS nombreCompleto,
-                   e.curp, e.rfc, e.fotos,
-                   a.latitud, a.longitud, a.fecha, a.hora, a.id_status
+                e.curp, e.rfc, e.fotos,
+                a.latitud, a.longitud, a.fecha, a.hora, a.id_status
             FROM empleados e
             LEFT JOIN asistencias a ON e.id = a.id_empleado AND a.id_status IN (1,2)
             WHERE {$where}

@@ -116,9 +116,10 @@ class UsuariosSistemaController extends ResourceController
      */
     public function asignarRoles($id = null): mixed
     {
-        $actor  = $this->request->jwtUser;
-        $roles  = $this->request->getVar('roles');
+        $actor = $this->request->jwtUser;
+        $roles = $this->request->getVar('roles');
 
+        
         if (!(int)$id) {
             return $this->respond(['status' => 'error', 'message' => 'ID de usuario requerido'], 400);
         }

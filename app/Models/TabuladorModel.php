@@ -65,11 +65,11 @@ class TabuladorModel extends Model
         if (!$tabulador) return ['status' => 'error', 'mensaje' => 'Tabulador no encontrado'];
 
         $detalle = $this->db->query("
-            SELECT tsd.*, mc.descripcion AS puesto
+            SELECT tsd.*, mc.valor AS puesto
             FROM tabulador_salarios_detalle tsd
             LEFT JOIN multicatalogo mc ON mc.id = tsd.id_puesto
             WHERE tsd.id_tabulador = ? AND tsd.estatus = 1
-            ORDER BY mc.descripcion
+            ORDER BY mc.valor
         ", [$id])->getResultArray();
 
         return ['status' => 'ok', 'data' => array_merge($tabulador, ['detalle' => $detalle])];

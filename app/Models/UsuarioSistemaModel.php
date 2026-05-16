@@ -192,39 +192,41 @@ class UsuarioSistemaModel extends Model
     public function setRoles(int $idUsuario, array $roles): array
     {
         $permisosMap = ['Actualizar' => 1, 'Eliminar' => 2, 'Crear' => 3, 'Leer' => 4];
+        $db = \Config\Database::connect();
 
-        $this->db->transStart();
-        try {
-            // Limpiar permisos actuales
-            $this->db->table('permiso_rol_empleados')->where('id_empleado', $idUsuario)->delete();
+        $db->query("DELETE FROM permiso_rol_empleados WHERE id_empleado = ?", [$idUsuario]);
 
-            foreach ($roles as $rol) {
-                if (!is_array($rol) || !isset($rol['id'])) continue;
-                $permisos = $rol['permisos'] ?? [];
-                if (!is_array($permisos) || count($permisos) === 0) continue;
+        $valores = [];
+        $params  = [];
 
-                foreach ($permisos as $permiso) {
-                    if (!isset($permisosMap[$permiso])) {
-                        throw new \Exception("Permiso no válido: {$permiso}");
-                    }
-                    $this->db->table('permiso_rol_empleados')->insert([
-                        'id_permiso' => $permisosMap[$permiso],
-                        'id_rol'     => (int)$rol['id'],
-                        'id_empleado' => $idUsuario,
-                    ]);
-                }
+        foreach ($roles as $rol) {
+            // Convertir stdClass a array si es necesario
+            if (is_object($rol)) $rol = (array) $rol;
+            if (!is_array($rol) || !isset($rol['id'])) continue;
+
+            $permisos = $rol['permisos'] ?? [];
+            // Convertir permisos si también son objetos
+            if (is_object($permisos)) $permisos = (array) $permisos;
+            if (!is_array($permisos) || count($permisos) === 0) continue;
+
+            foreach ($permisos as $permiso) {
+                $permiso = trim((string) $permiso);
+                if (!isset($permisosMap[$permiso])) continue;
+                $valores[] = "(?, ?, ?)";
+                $params[]  = $permisosMap[$permiso];
+                $params[]  = (int)$rol['id'];
+                $params[]  = $idUsuario;
             }
-
-            $this->db->transComplete();
-
-            if ($this->db->transStatus() === false) {
-                return $this->fail('Error en la transacción');
-            }
-
-            return ['status' => 'ok', 'mensaje' => 'Permisos asignados correctamente'];
-        } catch (\Exception $e) {
-            $this->db->transRollback();
-            return $this->fail($e->getMessage());
         }
+
+        if (!empty($valores)) {
+            $sql = "INSERT INTO permiso_rol_empleados (id_permiso, id_rol, id_empleado) VALUES " . implode(', ', $valores);
+            $db->query($sql, $params);
+        }
+
+        return [
+            'status'  => 'ok',
+            'mensaje' => 'Permisos asignados correctamente',
+        ];
     }
 }

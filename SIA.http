@@ -8,7 +8,7 @@
 @base     = http://localhost/SkyNet-SIA/public/api/v1
 @base_ping = http://localhost/SkyNet-SIA/public/api/ping
 @apikey   = k8sd7f9a2v1b4mzqp0xlj5ngtu3wrceh
-@token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTSUEtYXBpIiwiaWF0IjoxNzc4MDQzODQwLCJleHAiOjE3NzgwNDQ3NDAsImp0aSI6ImE4NjU0OTVmLWIyMTQtNDliYi1iMjUxLWZmNDMwNWRkZmRlYiIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdfX0.rF-PB-I82gWES-MJaMnHvwg5tTVCgX34ZV8jt79v1nw
+@token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzc4OTA4NDE5LCJleHAiOjE3Nzg5MTIwMTksImp0aSI6IjhjYTM2NzU5LTVmYTUtNDNmNi04ODEzLThlMzI0OTkzZTU5NyIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdfX0.w4_6HhP2dWPMcLQWAcLX7-1f4QRifLhMp0TjbgK0hDc
 @refresh  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTSUEtYXBpIiwiaWF0IjoxNzc4MDQzODQwLCJleHAiOjE3Nzg2NDg2NDAsImp0aSI6ImE4NjU0OTVmLWIyMTQtNDliYi1iMjUxLWZmNDMwNWRkZmRlYiIsInN1YiI6MSwidG9rZW5fdHlwZSI6InJlZnJlc2gifQ.PhYdi6TxHPqkKoK1DXyZMPn41D9wkOky5Z6o6yxQ368
 
 
@@ -35,7 +35,30 @@ Content-Type: application/json
   "password": "supersegura123"
 }
 
+
+
+### Audit Log
+GET {{base}}/audit-log HTTP/1.1
+Authorization: Bearer {{token}}
+
+
+### Nómina Preview
+GET {{base}}/nomina/preview?id_empleado=149&id_ubicacion=65&fecha_inicio=2026-05-01&fecha_fin=2026-05-14 HTTP/1.1
+Authorization: Bearer {{token}}
+
+### Empleados por servicio
+GET {{base}}/nomina/empleados-zona?id_zona=3
+Authorization: Bearer {{token}}
+
+
 ###
+GET {{base}}/dashboard/resumen
+Authorization: Bearer {{token}}
+
+### 
+GET {{base}}/dashboard/zona/3
+Authorization: Bearer {{token}}
+
 
 ### 2. ME — datos del usuario logueado
 GET {{base}}/auth/me HTTP/1.1
@@ -887,3 +910,4 @@ Content-Type: application/json
     }
   ]
 }
+

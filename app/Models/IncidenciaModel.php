@@ -49,6 +49,33 @@ class IncidenciaModel extends Model
         return ['status' => 'ok', 'data' => $data];
     }
 
+    public function listarTodas(string $estado = 'todas'): array
+    {
+        $where = match($estado) {
+            'pendiente' => 'i.activo = 0',
+            'aprobada'  => 'i.activo = 1',
+            'rechazada' => 'i.activo = 2',
+            default     => '1=1',
+        };
+
+        $data = $this->db->query("
+            SELECT i.id, i.id_empleado, i.activo,
+                m.valor, i.descripcion, e.rfc, e.curp,
+                CONCAT(e.nombre,' ',e.paterno,' ',e.materno) AS nombre,
+                i.fecha_inicio, i.fecha_final,
+                i.comprobante_nombre_original, i.comprobante_ruta
+            FROM incidencias i
+            LEFT JOIN empleados e ON e.id = i.id_empleado
+            LEFT JOIN multicatalogo m ON m.id = i.id_tipo_incidencia
+            WHERE {$where}
+            ORDER BY i.id DESC
+            LIMIT 1000
+        ")->getResultArray();
+
+        return ['status' => 'ok', 'data' => $data];
+    }
+
+    
     /**
      * Registros del biométrico con búsqueda y paginación.
      */
@@ -57,73 +84,77 @@ class IncidenciaModel extends Model
         $pageSize = max(1, min(200, $pageSize));
         $offset   = ($page - 1) * $pageSize;
 
-        $params  = [];
-        $wheres  = [];
+        $db = \Config\Database::connect();
+
+        $baseQuery = $db->table('asistencias a')
+            ->select("
+                CONCAT_WS(' ', e.nombre, e.paterno, e.materno) AS empleado,
+                CONCAT_WS(' ', a.fecha, a.hora) AS fecha,
+                CONCAT_WS(' | ', s.servicio, s.ubicacion, c.nombre_corto) AS servicio,
+                CONCAT_WS(', ', a.latitud, a.longitud) AS ubicacion,
+                CONCAT('https://www.google.com/maps?output=embed&q=', a.latitud, ',', a.longitud) AS maps_embed,
+                CONCAT('https://www.google.com/maps?q=', a.latitud, ',', a.longitud) AS maps_url,
+                a.ip,
+                CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno) AS capturista,
+                CASE WHEN a.id_status=1 THEN 'Entrada' WHEN a.id_status=2 THEN 'Salida' ELSE 'Desconocido' END AS estado
+            ")
+            ->join('empleados e',  'e.id = a.id_empleado',   'left')
+            ->join('empleados ec', 'a.id_capturista = ec.id', 'left')
+            ->join('servicios s',  'a.id_ubicacion = s.id',   'left')
+            ->join('clientes c',   's.id_cliente = c.id',     'left');
 
         if ($search !== '') {
-            $norm    = preg_replace('/\s+/', ' ', trim($search));
-            $wheres[] = "(
-                TRIM(REPLACE(REPLACE(CONCAT_WS(' ',e.nombre,e.paterno,e.materno),'  ',' '),'  ',' ')) LIKE :q
-                OR TRIM(REPLACE(REPLACE(CONCAT_WS(' ',ec.nombre,ec.paterno,ec.materno),'  ',' '),'  ',' ')) LIKE :q
-                OR a.ip LIKE :q
-                OR s.ubicacion LIKE :q
-                OR CONCAT_WS(', ',a.latitud,a.longitud) LIKE :q
-                OR (CASE WHEN a.id_status=1 THEN 'Entrada' WHEN a.id_status=2 THEN 'Salida' ELSE 'Desconocido' END) LIKE :q
-            )";
-            $params[':q'] = '%' . $norm . '%';
+            $norm = preg_replace('/\s+/', ' ', trim($search));
+            $q    = '%' . $norm . '%';
+            $baseQuery->groupStart()
+                ->like("CONCAT_WS(' ', e.nombre, e.paterno, e.materno)", $norm)
+                ->orLike("CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno)", $norm)
+                ->orLike('a.ip', $norm)
+                ->orLike('s.ubicacion', $norm)
+                ->groupEnd();
         }
 
         if ($dateFrom !== '' && $dateTo !== '') {
-            $wheres[] = 'a.fecha BETWEEN :df AND :dt';
-            $params[':df'] = $dateFrom;
-            $params[':dt'] = $dateTo;
+            $baseQuery->where('a.fecha >=', $dateFrom)->where('a.fecha <=', $dateTo);
         } elseif ($dateFrom !== '') {
-            $wheres[] = 'a.fecha >= :df';
-            $params[':df'] = $dateFrom;
+            $baseQuery->where('a.fecha >=', $dateFrom);
         } elseif ($dateTo !== '') {
-            $wheres[] = 'a.fecha <= :dt';
-            $params[':dt'] = $dateTo;
+            $baseQuery->where('a.fecha <=', $dateTo);
         }
 
-        $whereSql = $wheres ? ('WHERE ' . implode(' AND ', $wheres)) : '';
+        // Total — clona la query antes de agregar limit/offset
+        $total = $db->table('asistencias a')
+            ->join('empleados e',  'e.id = a.id_empleado',   'left')
+            ->join('empleados ec', 'a.id_capturista = ec.id', 'left')
+            ->join('servicios s',  'a.id_ubicacion = s.id',   'left')
+            ->join('clientes c',   's.id_cliente = c.id',     'left');
 
-        $joins = "
-            FROM asistencias a
-            LEFT JOIN empleados e   ON e.id = a.id_empleado
-            LEFT JOIN empleados ec  ON a.id_capturista = ec.id
-            LEFT JOIN servicios s   ON a.id_ubicacion = s.id
-            LEFT JOIN clientes c    ON s.id_cliente = c.id
-        ";
+        if ($search !== '') {
+            $norm = preg_replace('/\s+/', ' ', trim($search));
+            $total->groupStart()
+                ->like("CONCAT_WS(' ', e.nombre, e.paterno, e.materno)", $norm)
+                ->orLike("CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno)", $norm)
+                ->orLike('a.ip', $norm)
+                ->orLike('s.ubicacion', $norm)
+                ->groupEnd();
+        }
 
-        // Total
-        $stmtC = $this->db->connID->prepare("SELECT COUNT(*) AS total {$joins} {$whereSql}");
-        foreach ($params as $k => $v) $stmtC->bindValue($k, $v);
-        $stmtC->execute();
-        $total = (int)($stmtC->fetch(\PDO::FETCH_ASSOC)['total'] ?? 0);
+        if ($dateFrom !== '' && $dateTo !== '') {
+            $total->where('a.fecha >=', $dateFrom)->where('a.fecha <=', $dateTo);
+        } elseif ($dateFrom !== '') {
+            $total->where('a.fecha >=', $dateFrom);
+        } elseif ($dateTo !== '') {
+            $total->where('a.fecha <=', $dateTo);
+        }
 
-        // Datos
-        $sql = "
-            SELECT
-                CONCAT_WS(' ',e.nombre,e.paterno,e.materno) AS empleado,
-                CONCAT_WS(' ',a.fecha,a.hora) AS fecha,
-                CONCAT_WS(' | ',s.servicio,s.ubicacion,c.nombre_corto) AS servicio,
-                CONCAT_WS(', ',a.latitud,a.longitud) AS ubicacion,
-                CONCAT('https://www.google.com/maps?output=embed&q=',a.latitud,',',a.longitud) AS maps_embed,
-                CONCAT('https://www.google.com/maps?q=',a.latitud,',',a.longitud) AS maps_url,
-                a.ip,
-                CONCAT_WS(' ',ec.nombre,ec.paterno,ec.materno) AS capturista,
-                CASE WHEN a.id_status=1 THEN 'Entrada' WHEN a.id_status=2 THEN 'Salida' ELSE 'Desconocido' END AS estado
-            {$joins} {$whereSql}
-            ORDER BY a.id DESC
-            LIMIT :lim OFFSET :off
-        ";
+        $totalCount = (int)($total->countAllResults());
 
-        $stmt = $this->db->connID->prepare($sql);
-        foreach ($params as $k => $v) $stmt->bindValue($k, $v);
-        $stmt->bindValue(':lim', $pageSize, \PDO::PARAM_INT);
-        $stmt->bindValue(':off', $offset, \PDO::PARAM_INT);
-        $stmt->execute();
-        $data = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        // Datos paginados
+        $data = $baseQuery
+            ->orderBy('a.id', 'DESC')
+            ->limit($pageSize, $offset)
+            ->get()
+            ->getResultArray();
 
         return [
             'status' => 'ok',
@@ -131,8 +162,8 @@ class IncidenciaModel extends Model
             'meta'   => [
                 'page'       => $page,
                 'pageSize'   => $pageSize,
-                'total'      => $total,
-                'totalPages' => (int)ceil($total / max(1, $pageSize)),
+                'total'      => $totalCount,
+                'totalPages' => (int)ceil($totalCount / max(1, $pageSize)),
                 'search'     => $search,
                 'date_from'  => $dateFrom,
                 'date_to'    => $dateTo,

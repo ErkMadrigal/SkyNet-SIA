@@ -34,6 +34,17 @@ $routes->get('/', 'Home::index');
 $routes->group('api', function ($routes) {
     $routes->group('v1', function ($routes) {
 
+        // ── Audit Log ─────────────────────────────────
+
+        $routes->get('audit-log', 'Api\V1\AuditController::index', ['filter' => 'jwt:admin']);
+
+        /* ── NÓMINA ── */
+        $routes->group('nomina', ['filter' => 'jwt:admin'], function ($routes) {
+            $routes->get('preview',           'Api\V1\NominaController::preview');
+            $routes->get('empleados-servicio','Api\V1\NominaController::empleadosPorServicio');
+            $routes->get('empleados-zona',    'Api\V1\NominaController::empleadosPorZona');
+        });
+        
         /* ─────────────────────────────────────────────────
            AUTH — Rutas públicas (no requieren JWT)
         ───────────────────────────────────────────────── */
@@ -160,6 +171,8 @@ $routes->group('api', function ($routes) {
             $routes->post('(:num)/item',       'Api\V1\ReportesController::upsertItem/$1');
             $routes->delete('item/(:num)',     'Api\V1\ReportesController::deshabilitarItem/$1');
             $routes->patch('(:num)/estatus',   'Api\V1\ReportesController::setEstatus/$1');
+            $routes->put('(:num)',             'Api\V1\ReportesController::update/$1');
+
         });
 
 
@@ -258,6 +271,11 @@ $routes->group('api', function ($routes) {
             $routes->get('(:num)',          'Api\V1\UsuariosSistemaController::show/$1');
             $routes->post('/',              'Api\V1\UsuariosSistemaController::create');
             $routes->post('(:num)/roles',   'Api\V1\UsuariosSistemaController::asignarRoles/$1');
+        });
+
+        $routes->group('dashboard', ['filter' => 'jwt'], function ($routes) {
+            $routes->get('resumen', 'Api\V1\DashboardController::resumen');
+            $routes->get('zona/(:num)', 'Api\V1\DashboardController::zona/$1');
         });
     });
 });

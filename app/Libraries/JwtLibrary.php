@@ -36,6 +36,9 @@ class JwtLibrary
         if (empty($this->secret)) {
             throw new \RuntimeException('JWT_SECRET no está configurado en .env');
         }
+
+        $this->accessTtl  = (int) env('JWT_ACCESS_TTL',  3600);
+        $this->refreshTtl = (int) env('JWT_REFRESH_TTL', 604800);
     }
 
     /* ─────────────────────────────────────────

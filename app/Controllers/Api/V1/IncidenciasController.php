@@ -25,8 +25,9 @@ class IncidenciasController extends ResourceController
      */
     public function index(): mixed
     {
-        $model = new IncidenciaModel();
-        return $this->respond($model->listarPendientes());
+        $estado = $this->request->getVar('estado') ?? 'pendiente';
+        $model  = new IncidenciaModel();
+        return $this->respond($model->listarTodas($estado));
     }
 
     /**
@@ -135,7 +136,8 @@ class IncidenciasController extends ResourceController
 
         $anio    = date('Y');
         $mes     = date('m');
-        $baseDir = ROOTPATH . "../uploads/incidencias/{$anio}/{$mes}/";
+        $baseDir = FCPATH . "uploads/incidencias/{$anio}/{$mes}/";
+
 
         if (!is_dir($baseDir)) {
             mkdir($baseDir, 0775, true);

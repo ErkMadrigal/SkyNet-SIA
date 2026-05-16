@@ -30,3 +30,20 @@ Jerarquía de roles: SuperAdmin (nivel 1) → Admin (nivel 2) → Operador (nive
 - Sidebar dinámico según campo "vistas" que devuelve el login
 - Primer módulo: empleados (listado + registro)
 - Backend en localhost/SkyNet-SIA/public/api/v1 con Bearer token
+
+
+
+Estamos desarrollando SkyNet-SIA (se muestra como SIAG en la UI).
+Entorno: XAMPP local, MariaDB, base RecursosHumanos.
+
+✅ BACKEND 100% LISTO:
+- Proyecto en C:\xampp\htdocs\SkyNet-SIA
+- 87 endpoints en /api/v1/ — todos funcionando
+- Login verificado ✅
+- Página de bienvenida en localhost/SkyNet-SIA/public/
+- Archivo SkyNet-SIA.http con los 87 requests para VS Code REST Client
+
+⏭️ MAÑANA: Prueba del EP más importante
+- Me pasas el endpoint que quieres probar
+- Lo revisamos, depuramos y dejamos funcionando al 100%
+- Después arrancamos el frontend Vue 3
