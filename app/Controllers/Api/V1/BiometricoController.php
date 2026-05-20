@@ -24,16 +24,13 @@ class BiometricoController extends ResourceController
     protected $format = 'json';
 
     /**
-     * POST /api/v1/biometrico/buscar
-     *
-     * Busca un empleado para el biométrico.
-     * Body: { query: "CURP|RFC|ID", salida: bool }
+     * POST /api/v1/biometrico/buscar-login
+     * Busca empleado sin validar asistencia — solo para login del kiosko.
      */
-    public function buscar(): mixed
+    public function buscarLogin(): mixed
     {
-        $model  = new EmpleadoModel();
-        $query  = trim($this->request->getVar('query') ?? '');
-        $salida = (bool)($this->request->getVar('salida') ?? false);
+        $model = new EmpleadoModel();
+        $query = trim($this->request->getVar('query') ?? '');
 
         if ($query === '') {
             return $this->respond(['status' => 'error', 'message' => 'Se requiere un identificador'], 400);
@@ -41,36 +38,12 @@ class BiometricoController extends ResourceController
 
         $len = strlen($query);
         if (!in_array($len, [6, 11, 13, 18], true) && !ctype_digit($query)) {
-            return $this->respond(['status' => 'error', 'message' => 'Parámetros inválidos, verifique el identificador'], 422);
+            return $this->respond(['status' => 'error', 'message' => 'Identificador inválido'], 422);
         }
 
-        if ($salida) {
-            // Modo salida: necesita datos + última asistencia
-            $result = $model->buscarBiometricoConAsistencia($query);
-
-            if ($result['status'] !== 'ok' || empty($result['data'])) {
-                return $this->respond(['status' => 'error', 'message' => 'Empleado no tiene registro de entrada'], 404);
-            }
-
-            $idStatus = (int)($result['data']['id_status'] ?? 0);
-            if ($idStatus === 2) {
-                return $this->respond(['status' => 'error', 'message' => 'Empleado ya tiene registrada la salida'], 409);
-            }
-
-            return $this->respond($result);
-        }
-
-        // Modo entrada: verificar que existe y no tenga entrada ya registrada
         $existe = $model->buscarBiometrico($query, $len);
         if (!$existe) {
-            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado, verifique sus datos'], 404);
-        }
-
-        $conAsistencia = $model->buscarBiometricoConAsistencia($query);
-        $idStatus = (int)(($conAsistencia['data'] ?? [])['id_status'] ?? 0);
-
-        if ($idStatus === 1) {
-            return $this->respond(['status' => 'error', 'message' => 'Empleado ya se encuentra registrado en el sistema de asistencia'], 409);
+            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado, verifica tu identificador'], 404);
         }
 
         return $this->respond(['status' => 'ok', 'data' => $existe]);

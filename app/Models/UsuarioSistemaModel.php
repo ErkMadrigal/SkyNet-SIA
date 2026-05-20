@@ -229,4 +229,27 @@ class UsuarioSistemaModel extends Model
             'mensaje' => 'Permisos asignados correctamente',
         ];
     }
+
+    public function resetPassword(int $id, string $hash): void
+    {
+        $this->db->table('usuario')
+            ->where('id', $id)
+            ->update(['password' => $hash]);
+    }
+
+    public function toggleEstatus(int $id): array
+    {
+        $actual = $this->db->table('usuario')
+            ->select('estatus')
+            ->where('id', $id)
+            ->get()->getRowArray();
+
+        $nuevo = $actual['estatus'] ? 0 : 1;
+
+        $this->db->table('usuario')
+            ->where('id', $id)
+            ->update(['estatus' => $nuevo]);
+
+        return ['estatus' => $nuevo];
+    }
 }

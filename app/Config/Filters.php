@@ -24,15 +24,16 @@ class Filters extends BaseConfig
         'secureheaders' => SecureHeaders::class,
         'jwt'           => \App\Filters\JwtFilter::class,
         'apikey'        => \App\Filters\ApiKeyFilter::class,
+        'cors'          => \App\Filters\CorsFilter::class,
     ];
 
     // ── Sin filtros requeridos globales ──────────────────────────────────
     // InvalidChars causaba el bug en CI4 4.7.2 retornando Response object
     // en rutas no encontradas. El toolbar solo aplica en HTML, no en JSON.
     public array $required = [
-        'before' => [],
-        'after'  => [],
-    ];
+    'before' => ['cors'],  
+    'after'  => ['cors'],  
+];
 
     public array $filters = [];
 }

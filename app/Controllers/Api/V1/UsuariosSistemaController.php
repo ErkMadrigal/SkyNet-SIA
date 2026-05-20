@@ -135,4 +135,83 @@ class UsuariosSistemaController extends ResourceController
 
         return $this->respond($res);
     }
+
+    /* ── RESET PASSWORD ──────────────────────────────── */
+
+    /**
+     * POST /api/v1/usuarios/{id}/reset-password
+     * Genera un nuevo password temporal de 6 dígitos y lo devuelve en claro.
+     */
+    public function resetPassword($id = null): mixed
+    {
+        $actor = $this->request->jwtUser;
+
+        if (!(int)$id) {
+            return $this->respond(['status' => 'error', 'message' => 'ID requerido'], 400);
+        }
+
+        $model    = new UsuarioSistemaModel();
+        $usuario  = $model->getUserById((int)$id);
+
+        if (empty($usuario['data'])) {
+            return $this->respond(['status' => 'error', 'message' => 'Usuario no encontrado'], 404);
+        }
+
+        $password = random_int(100000, 999999);
+        $hash     = password_hash((string)$password, PASSWORD_ARGON2ID);
+
+        $model->resetPassword((int)$id, $hash);
+
+        AuditLibrary::log(
+            (int)$actor->id,
+            'RESET_PASSWORD',
+            'usuario',
+            (string)$id,
+            "Reset de contraseña para usuario ID {$id}"
+        );
+
+        return $this->respond([
+            'status'   => 'ok',
+            'mensaje'  => 'Contraseña restablecida correctamente',
+            'password' => $password,
+        ]);
+    }
+
+    /* ── TOGGLE ESTATUS ──────────────────────────────── */
+
+    /**
+     * PATCH /api/v1/usuarios/{id}/estatus
+     * Activa o desactiva un usuario del sistema.
+     */
+    public function toggleEstatus($id = null): mixed
+    {
+        $actor = $this->request->jwtUser;
+
+        if (!(int)$id) {
+            return $this->respond(['status' => 'error', 'message' => 'ID requerido'], 400);
+        }
+
+        $model   = new UsuarioSistemaModel();
+        $usuario = $model->getUserById((int)$id);
+
+        if (empty($usuario['data'])) {
+            return $this->respond(['status' => 'error', 'message' => 'Usuario no encontrado'], 404);
+        }
+
+        $res = $model->toggleEstatus((int)$id);
+
+        AuditLibrary::log(
+            (int)$actor->id,
+            'TOGGLE_ESTATUS_USUARIO',
+            'usuario',
+            (string)$id,
+            "Cambio de estatus usuario ID {$id}"
+        );
+
+        return $this->respond([
+            'status'  => 'ok',
+            'mensaje' => 'Estatus actualizado',
+            'data'    => $res,
+        ]);
+    }
 }

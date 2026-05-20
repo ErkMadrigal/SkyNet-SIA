@@ -486,4 +486,77 @@ class AuthController extends ResourceController
             ],
         ], 200);
     }
+
+    /**
+     * PUT /api/v1/auth/me
+     * Actualiza nombre y correo del usuario autenticado.
+     */
+    public function updateMe(): mixed
+    {
+        $actor  = $this->request->jwtUser;
+        $nombre = trim($this->request->getVar('nombre') ?? '');
+        $correo = trim($this->request->getVar('correo') ?? '');
+
+        if (!$nombre || !$correo) {
+            return $this->respond(['status' => 'error', 'message' => 'Nombre y correo son requeridos'], 422);
+        }
+
+        if (!filter_var($correo, FILTER_VALIDATE_EMAIL)) {
+            return $this->respond(['status' => 'error', 'message' => 'Correo inválido'], 422);
+        }
+
+        $model = new \App\Models\UsuarioModel();
+
+        // Verificar que el correo no lo use otro usuario
+        $existente = $model->where('correo', $correo)
+                        ->where('id !=', (int)$actor->id)
+                        ->first();
+        if ($existente) {
+            return $this->respond(['status' => 'error', 'message' => 'El correo ya está en uso'], 409);
+        }
+
+        $model->update((int)$actor->id, [
+            'nombre' => $nombre,
+            'correo' => $correo,
+        ]);
+
+        AuditLibrary::log((int)$actor->id, 'UPDATE_PERFIL', 'usuario', (string)$actor->id, 'Actualizó su perfil');
+
+        return $this->respond(['status' => 'ok', 'message' => 'Perfil actualizado correctamente']);
+    }
+
+    /**
+     * POST /api/v1/auth/cambiar-password
+     * Cambia la contraseña del usuario autenticado.
+     * Body: { password_actual, password_nuevo }
+     */
+    public function cambiarPassword(): mixed
+    {
+        $actor           = $this->request->jwtUser;
+        $passwordActual  = $this->request->getVar('password_actual') ?? '';
+        $passwordNuevo   = $this->request->getVar('password_nuevo')  ?? '';
+
+        if (!$passwordActual || !$passwordNuevo) {
+            return $this->respond(['status' => 'error', 'message' => 'Ambas contraseñas son requeridas'], 422);
+        }
+
+        if (strlen($passwordNuevo) < 6) {
+            return $this->respond(['status' => 'error', 'message' => 'La nueva contraseña debe tener al menos 6 caracteres'], 422);
+        }
+
+        $model   = new \App\Models\UsuarioModel();
+        $usuario = $model->find((int)$actor->id);
+
+        if (!$usuario || !password_verify($passwordActual, $usuario['password'])) {
+            return $this->respond(['status' => 'error', 'message' => 'La contraseña actual es incorrecta'], 401);
+        }
+
+        $model->update((int)$actor->id, [
+            'password' => password_hash($passwordNuevo, PASSWORD_ARGON2ID),
+        ]);
+
+        AuditLibrary::log((int)$actor->id, 'CAMBIO_PASSWORD', 'usuario', (string)$actor->id, 'Cambió su contraseña');
+
+        return $this->respond(['status' => 'ok', 'message' => 'Contraseña actualizada correctamente']);
+    }
 }
