@@ -16,9 +16,10 @@ class CorsFilter implements FilterInterface
             'http://localhost:5173',
             'http://localhost:8100',
             'http://192.168.100.63:8100',
-            
+            'https://arma2.com.mx',
             'capacitor://localhost',
             'ionic://localhost',
+            'http://localhost',
         ];
 
         if (in_array($origin, $allowed)) {
