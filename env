@@ -4,11 +4,11 @@
 #--------------------------------------------------------------------
 
 # ── Entorno ─────────────────────────────────────────────────────────
-CI_ENVIRONMENT = development
-# CI_ENVIRONMENT = production
+# CI_ENVIRONMENT = development
+CI_ENVIRONMENT = production
 
 # ── App ─────────────────────────────────────────────────────────────
-app.baseURL      = 'http://localhost:8080/'
+app.baseURL      = 'https://serprosep.vinculasag.com/'
 APP_BASEURL      = 'SkyNet-SIA'
 app.forceGlobalSecureRequests = false
 
@@ -29,8 +29,9 @@ database.default.DBCollat = utf8mb4_unicode_ci
 # JWT_SECRET = KY2HEFvbYaJCjm94BJB9fAtfWe1eMcMpcAk3SWkWt3dPCclhu2tHAErxknGDoPmJGQEgiZ5wQJMMC22o8kE+Wg==
 JWT_SECRET=zT9wU!5vYp@34Fk#LsP1eB^dWc@R7xQn
 
-# Access token TTL en segundos (default: 900 = 15 min)
-JWT_ACCESS_TTL  = 900
+# Access token TTL en segundos (default: 3600 = 1 hora)
+JWT_ACCESS_TTL  = 3600
+
 
 # Refresh token TTL en segundos (default: 604800 = 7 días)
 JWT_REFRESH_TTL = 604800
