@@ -32,7 +32,7 @@ class AuthController extends ResourceController
     protected $format = 'json';
 
     /** Puestos permitidos para el acceso biométrico (del legacy) */
-    private array $puestosPermitidos = [1364, 1365, 1381, 1383, 1366, 1384, 1385];
+    // private array $puestosPermitidos = [1364, 1365, 1381, 1383, 1366, 1384, 1385];
 
     /* ═══════════════════════════════════════════════════════════════
        SISTEMA WEB
@@ -405,21 +405,21 @@ class AuthController extends ResourceController
         }
 
         // ── Validar acceso biométrico habilitado ──────────────────
-        if ((int)($empleado['acceso_biometrico'] ?? 0) !== 1) {
-            return $this->respond([
-                'status'  => 'error',
-                'message' => 'El empleado no tiene permitido el acceso biométrico',
-            ], 403);
-        }
+        // if ((int)($empleado['acceso_biometrico'] ?? 0) !== 1) {
+        //     return $this->respond([
+        //         'status'  => 'error',
+        //         'message' => 'El empleado no tiene permitido el acceso biométrico',
+        //     ], 403);
+        // }
 
         // ── Validar puesto permitido ──────────────────────────────
-        $idPuesto = (int)($empleado['id_puesto'] ?? 0);
-        if (! in_array($idPuesto, $this->puestosPermitidos, true)) {
-            return $this->respond([
-                'status'  => 'error',
-                'message' => 'El usuario no tiene permitido el acceso',
-            ], 403);
-        }
+        // $idPuesto = (int)($empleado['id_puesto'] ?? 0);
+        // if (! in_array($idPuesto, $this->puestosPermitidos, true)) {
+        //     return $this->respond([
+        //         'status'  => 'error',
+        //         'message' => 'El usuario no tiene permitido el acceso',
+        //     ], 403);
+        // }
 
         return $this->respond([
             'status' => 'ok',
