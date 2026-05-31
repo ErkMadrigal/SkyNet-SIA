@@ -27,6 +27,7 @@ class BiometricoController extends ResourceController
      * POST /api/v1/biometrico/buscar-login
      * Busca empleado sin validar asistencia — solo para login del kiosko.
      */
+
     public function buscarLogin(): mixed
     {
         $model = new EmpleadoModel();
