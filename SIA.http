@@ -5,11 +5,11 @@
 # Variables globales — ajusta según tu entorno
 # ============================================================
 
-#@base     = http://localhost/SkyNet-SIA/public/api/v1
-#@base_ping = http://localhost/SkyNet-SIA/public/api/ping
+@base     = http://localhost/SkyNet-SIA/public/api/v1
+@base_ping = http://localhost/SkyNet-SIA/public/api/ping
 
-@base     = https://arma2.com.mx/SkyNet-SIA/api/v1
-@base_ping = https://arma2.com.mx/SkyNet-SIA/api/ping
+# @base     = https://serprosep.vinculasag.com/api/v1
+# @base_ping = https://serprosep.vinculasag.com/api/ping
 
 @apikey   = k8sd7f9a2v1b4mzqp0xlj5ngtu3wrceh
 @token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzc4OTA4NDE5LCJleHAiOjE3Nzg5MTIwMTksImp0aSI6IjhjYTM2NzU5LTVmYTUtNDNmNi04ODEzLThlMzI0OTkzZTU5NyIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdfX0.w4_6HhP2dWPMcLQWAcLX7-1f4QRifLhMp0TjbgK0hDc
@@ -117,7 +117,16 @@ Content-Type: application/json
 X-API-KEY: {{apikey}}
 
 {
-  "query": "LODR951031FF3"
+  "query": "000178"
+}
+
+### 7. BIOMÉTRICO — buscar guardia (requiere X-API-KEY)
+POST {{base}}/biometrico/buscar-login HTTP/1.1
+Content-Type: application/json
+X-API-KEY: {{apikey}}
+
+{
+  "query": "000178"
 }
 
 ###

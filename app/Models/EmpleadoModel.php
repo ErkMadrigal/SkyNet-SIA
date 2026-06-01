@@ -23,7 +23,7 @@ class EmpleadoModel extends Model
         'clave_interbancaria','id_banco','estatus','alergias','fotos',
         'tipoSangre','escolaridad','parentesco','nombreEmergencia',
         'telefonoEmergencia','created_by','updated_at','updated_by',
-        'deleted_at','deleted_by','is_deleted','estado_actual','ultima_actividad',
+        'deleted_at','deleted_by','is_deleted','estado_actual','ultima_actividad','acceso_biometrico'
     ];
 
     protected $useTimestamps = false;
@@ -35,11 +35,12 @@ class EmpleadoModel extends Model
     /**
      * Lista paginada con filtros (equivalente a getEmpleados legacy).
      */
-    public function listar(int $limit, int $offset, array $zonas = [], array $puestos = [], ?string $fechas = null, ?string $status = null): array
+    public function listar(int $limit, int $offset, array $zonas = [], array $puestos = [], ?string $fechas = null, ?string $status = null, ?int $ubicacion = null): array
     {
         $builder = $this->db->table('empleados e')
-            ->select('e.id, CONCAT(e.nombre," ",e.paterno," ",e.materno) AS nombre, e.curp, e.fecha_efectiva, mp.valor AS puesto, e.estatus')
-            ->join('multicatalogo mp', 'e.id_puesto = mp.id', 'left');
+            ->select('e.id, CONCAT(e.nombre," ",e.paterno," ",e.materno) AS nombre, e.curp, e.fecha_efectiva, mp.valor AS puesto, e.estatus, e.acceso_biometrico, s.servicio AS ubicacion_principal')
+            ->join('multicatalogo mp', 'e.id_puesto = mp.id', 'left')
+            ->join('servicios s', 'e.id_ubicacion_principal = s.id', 'left');
 
         if (!empty($puestos)) {
             $builder->whereIn('e.id_puesto', $puestos);
@@ -55,6 +56,10 @@ class EmpleadoModel extends Model
 
         if (!empty($status) && $status !== '000') {
             $builder->where('e.estatus', $status);
+        }
+
+        if ($ubicacion !== null) {
+            $builder->where('e.id_ubicacion_principal', $ubicacion); // ← nuevo
         }
 
         $total = (clone $builder)->countAllResults(false);
@@ -76,9 +81,10 @@ class EmpleadoModel extends Model
     public function getConCatalogos(int $id): array
     {
         $data = $this->db->table('empleados e')
-            ->select('e.*, CONCAT(e.nombre," ",e.paterno," ",e.materno) AS nombreCompleto, mp.valor AS puesto, mb.valor AS institucionBancaria')
+            ->select('e.*, CONCAT(e.nombre," ",e.paterno," ",e.materno) AS nombreCompleto, mp.valor AS puesto, mb.valor AS institucionBancaria, s.servicio AS ubicacion_principal')
             ->join('multicatalogo mp', 'e.id_puesto = mp.id', 'left')
             ->join('multicatalogo mb', 'e.id_banco = mb.id', 'left')
+            ->join('servicios s', 'e.id_ubicacion_principal = s.id', 'left')  // ← esto
             ->where('e.id', $id)
             ->get()->getRowArray();
 
@@ -94,12 +100,13 @@ class EmpleadoModel extends Model
      */
     public function buscar(string $search, int $limit, int $offset): array
     {
-        $search = preg_replace('/\s+/', ' ', trim($search));
-        $like   = '%' . $search . '%';
+        $search  = preg_replace('/\s+/', ' ', trim($search));
+        $like    = '%' . $search . '%';
         $idExact = ctype_digit($search) ? (int)ltrim($search, '0') : -1;
 
         $base = $this->db->table('empleados e')
             ->join('multicatalogo mp', 'e.id_puesto = mp.id', 'left')
+            ->join('servicios s', 'e.id_ubicacion_principal = s.id', 'left')  // ← aquí
             ->groupStart()
                 ->like('CONCAT_WS(" ", TRIM(e.nombre), TRIM(e.paterno), TRIM(e.materno))', $search)
                 ->orLike('CONCAT_WS(" ", TRIM(e.paterno), TRIM(e.materno), TRIM(e.nombre))', $search)
@@ -111,10 +118,10 @@ class EmpleadoModel extends Model
 
         $total = (clone $base)->countAllResults(false);
 
-        $data = $base->select('e.id, CONCAT_WS(" ",e.nombre,e.paterno,e.materno) AS nombre, e.fecha_ingreso, mp.valor AS puesto, e.estatus, e.curp, e.fecha_efectiva')
-                     ->orderBy('e.id', 'DESC')
-                     ->limit($limit, $offset)
-                     ->get()->getResultArray();
+        $data = $base->select('e.id, CONCAT_WS(" ",e.nombre,e.paterno,e.materno) AS nombre, e.fecha_ingreso, mp.valor AS puesto, e.estatus, e.curp, e.fecha_efectiva, e.acceso_biometrico, s.servicio AS ubicacion_principal')
+                    ->orderBy('e.id', 'DESC')
+                    ->limit($limit, $offset)
+                    ->get()->getResultArray();
 
         return ['status' => 'ok', 'data' => $data, 'total' => $total];
     }
@@ -315,6 +322,7 @@ class EmpleadoModel extends Model
                 'is_deleted' => 1,
                 'deleted_at' => date('Y-m-d H:i:s'),
                 'deleted_by' => $userId,
+                'acceso_biometrico'  => 0,
             ]);
 
             $this->db->table('baja_empleado')->insert([
@@ -497,10 +505,13 @@ class EmpleadoModel extends Model
     /**
      * Registra entrada o salida en la tabla asistencias.
      */
-    public function registrarAsistencia(int $idEmpleado, float $lat, float $lon, string $ip, int $status, int $idCapturista, int $idUbicacion): array
-    {
+    public function registrarAsistencia(
+        int $idEmpleado, float $lat, float $lon, string $ip,
+        int $status, int $idCapturista, int $idUbicacion,
+        array $extra = []  // ← nuevo parámetro opcional
+    ): array {
         try {
-            $this->db->table('asistencias')->insert([
+            $data = [
                 'id_empleado'   => $idEmpleado,
                 'fecha'         => date('Y-m-d'),
                 'hora'          => date('H:i:s'),
@@ -510,11 +521,35 @@ class EmpleadoModel extends Model
                 'id_status'     => $status,
                 'id_capturista' => $idCapturista,
                 'id_ubicacion'  => $idUbicacion ?: null,
-            ]);
+            ];
+
+            // Campos de turno — solo si vienen
+            if (!empty($extra['id_turno']))              $data['id_turno']              = $extra['id_turno'];
+            if (!empty($extra['estado_entrada']))         $data['estado_entrada']         = $extra['estado_entrada'];
+            if (isset($extra['minutos_retardo']))         $data['minutos_retardo']         = $extra['minutos_retardo'];
+            if (!empty($extra['estado_salida']))          $data['estado_salida']          = $extra['estado_salida'];
+            if (!empty($extra['id_asistencia_entrada']))  $data['id_asistencia_entrada']  = $extra['id_asistencia_entrada'];
+
+            $this->db->table('asistencias')->insert($data);
+
+            $this->db->query("
+                UPDATE empleados 
+                SET id_ubicacion_principal = (
+                    SELECT id_ubicacion
+                    FROM asistencias
+                    WHERE id_empleado = ? AND id_ubicacion IS NOT NULL
+                    AND id_ubicacion IN (SELECT id FROM servicios)
+                    GROUP BY id_ubicacion
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 1
+                )
+                WHERE id = ?
+            ", [$idEmpleado, $idEmpleado]);
 
             return [
                 'status'  => 'ok',
                 'mensaje' => $status === 1 ? 'Entrada registrada' : 'Salida registrada',
+                'id'      => $this->db->insertID(),
             ];
         } catch (\Exception $e) {
             return ['status' => 'error', 'mensaje' => $e->getMessage()];

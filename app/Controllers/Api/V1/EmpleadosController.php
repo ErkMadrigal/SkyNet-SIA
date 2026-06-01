@@ -55,17 +55,18 @@ class EmpleadosController extends ResourceController
         $limit  = (int)($this->request->getVar('limit')  ?? 50);
         $offset = ($pagina - 1) * $limit;
 
-        $zonas   = $this->request->getVar('zonas')   ?? [];
-        $puestos = $this->request->getVar('puestos') ?? [];
-        $fechas  = $this->request->getVar('fechas');
-        $status  = $this->request->getVar('status');
+        $zonas    = $this->request->getVar('zonas')    ?? [];
+        $puestos  = $this->request->getVar('puestos')  ?? [];
+        $fechas   = $this->request->getVar('fechas');
+        $status   = $this->request->getVar('status');
+        $ubicacion = $this->request->getVar('ubicacion') ? (int)$this->request->getVar('ubicacion') : null; // ← nuevo
 
-        $resultado = $model->listar($limit, $offset, (array)$zonas, (array)$puestos, $fechas, $status);
+        $resultado = $model->listar($limit, $offset, (array)$zonas, (array)$puestos, $fechas, $status, $ubicacion); // ← pásalo
 
         return $this->respond([
-            'status'     => 'ok',
-            'empleado'   => $resultado,
-            'AllTotal'   => ['empleadosTotales' => $model->countAll()],
+            'status'      => 'ok',
+            'empleado'    => $resultado,
+            'AllTotal'    => ['empleadosTotales' => $model->countAll()],
             'completados' => ['empleadosTotales' => $model->totalPorEstatus(1)],
             'pendientes'  => ['empleadosTotales' => $model->totalPorEstatus(2)],
             'bajas'       => ['empleadosTotales' => $model->totalPorEstatus(0)],
@@ -525,6 +526,8 @@ class EmpleadosController extends ResourceController
         return $this->respond($res);
     }
 
+
+    
     /**
      * POST /api/v1/empleados/{id}/foto
      * Multipart: foto (archivo)
@@ -557,6 +560,41 @@ class EmpleadosController extends ResourceController
         AuditLibrary::log((int)$actor->id, 'FOTO_EMPLEADO', 'empleados', (string)$id, 'Actualizó foto');
 
         return $this->respond($res);
+    }
+
+    /**
+     * PATCH /api/v1/empleados/{id}/biometrico
+     * Body: { acceso_biometrico: 0|1 }
+     */
+    public function toggleBiometrico($id = null): mixed
+    {
+        $actor = $this->request->jwtUser;
+        $model = new EmpleadoModel();
+
+        $empleado = $model->find((int)$id);
+        if (!$empleado) {
+            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
+        }
+
+        $body  = $this->request->getJSON(true);
+        $valor = isset($body['acceso_biometrico']) ? (int)$body['acceso_biometrico'] : null;
+
+        if ($valor === null || !in_array($valor, [0, 1], true)) {
+            return $this->respond(['status' => 'error', 'message' => 'Valor inválido. Use 0 o 1'], 422);
+        }
+
+        $model->update((int)$id, ['acceso_biometrico' => $valor]);
+
+        $accion = $valor === 1 ? 'HABILITAR_BIOMETRICO' : 'REVOCAR_BIOMETRICO';
+        $msg    = $valor === 1 ? 'Acceso biométrico habilitado' : 'Acceso biométrico revocado';
+
+        AuditLibrary::log((int)$actor->id, $accion, 'empleados', (string)$id, $msg);
+
+        return $this->respond([
+            'status'  => 'ok',
+            'message' => $msg,
+            'data'    => ['id' => (int)$id, 'acceso_biometrico' => $valor],
+        ]);
     }
 
     /* ═══════════════════════════════════════════════════════════════

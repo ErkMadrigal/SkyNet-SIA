@@ -79,6 +79,8 @@ $routes->group('api', function ($routes) {
             $routes->post('buscar',   'Api\V1\BiometricoController::buscar');
             $routes->post('buscar-login', 'Api\V1\BiometricoController::buscarLogin'); 
             $routes->post('registro', 'Api\V1\BiometricoController::registro');
+            $routes->get('estado/(:num)', 'Api\V1\BiometricoController::estado/$1');
+
         });
 
         /* ─────────────────────────────────────────────────
@@ -96,6 +98,7 @@ $routes->group('api', function ($routes) {
            EMPLEADOS
         ───────────────────────────────────────────────── */
         $routes->group('empleados', ['filter' => 'jwt'], function ($routes) {
+            $routes->patch('(:num)/biometrico', 'Api\V1\EmpleadosController::toggleBiometrico/$1');
             $routes->get('/',             'Api\V1\EmpleadosController::index');
             $routes->get('buscar',        'Api\V1\EmpleadosController::buscar');
             $routes->get('dashboard',     'Api\V1\EmpleadosController::dashboard');

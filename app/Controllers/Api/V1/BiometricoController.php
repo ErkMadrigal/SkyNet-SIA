@@ -58,7 +58,9 @@ class BiometricoController extends ResourceController
      */
     public function registro(): mixed
     {
-        $actor = $this->request->jwtUser;
+        $actor        = $this->request->jwtUser ?? null;
+        $idCapturista = (int)($this->request->getVar('id_capturista') ?? ($actor ? $actor->id : 0));
+
         $model = new EmpleadoModel();
 
         $rules = [
@@ -69,58 +71,302 @@ class BiometricoController extends ResourceController
         ];
 
         if (!$this->validate($rules)) {
-            return $this->respond(['status' => 'error', 'message' => 'Datos inválidos', 'errors' => $this->validator->getErrors()], 422);
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Datos inválidos',
+                'errors'  => $this->validator->getErrors(),
+            ], 422);
         }
 
         $idEmpleado  = (int)$this->request->getVar('id_empleado');
         $lat         = (float)$this->request->getVar('lat');
         $lon         = (float)$this->request->getVar('lon');
         $ip          = trim($this->request->getVar('ip'));
-        $salida      = (bool)($this->request->getVar('salida') ?? false);
+        $salida      = filter_var($this->request->getVar('salida'), FILTER_VALIDATE_BOOLEAN);
         $nuevoStatus = $salida ? 2 : 1;
 
-        // Validar doble entrada/salida
+        // ── Obtener turno del empleado ────────────────────────────
+        $db    = \Config\Database::connect();
+        $turno = $db->query(
+            'SELECT e.id_turno, mt.valor AS turno_valor
+             FROM empleados e
+             LEFT JOIN multicatalogo mt ON e.id_turno = mt.id
+             WHERE e.id = ?',
+            [$idEmpleado]
+        )->getRowArray();
+
+        $idTurno = (int)($turno['id_turno'] ?? 0);
+
+        $configTurnos = [
+            1367 => ['entrada' => '08:00', 'salida' => '08:00', 'siguiente_dia' => true,  'tipo' => '24x24'],
+            1382 => ['entrada' => '08:00', 'salida' => '20:00', 'siguiente_dia' => false, 'tipo' => '12x12'],
+            1387 => ['entrada' => '09:00', 'salida' => '19:00', 'siguiente_dia' => false, 'tipo' => 'admin'],
+            1398 => ['entrada' => '08:00', 'salida' => '08:00', 'siguiente_dia' => true,  'tipo' => '12x24'],
+            1399 => ['entrada' => '07:00', 'salida' => '19:00', 'siguiente_dia' => false, 'tipo' => 'diurno'],
+            1400 => ['entrada' => '19:00', 'salida' => '07:00', 'siguiente_dia' => true,  'tipo' => 'nocturno'],
+        ];
+
+        $configTurno = $configTurnos[$idTurno] ?? null;
+        $ahora       = new \DateTime('now', new \DateTimeZone('America/Mexico_City'));
+
+        // ── Validar doble entrada/salida ──────────────────────────
         $ultima     = $model->ultimaAsistencia($idEmpleado);
         $lastStatus = (int)(($ultima['data'] ?? [])['id_status'] ?? 0);
 
         if ($nuevoStatus === 2 && $lastStatus !== 1) {
-            return $this->respond(['status' => 'error', 'message' => 'No puedes registrar doble salida: sin entrada previa'], 409);
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'No puedes registrar salida: sin entrada previa',
+            ], 409);
         }
 
         if ($nuevoStatus === 1 && $lastStatus === 1) {
-            return $this->respond(['status' => 'error', 'message' => 'No puedes registrar doble entrada: ya tiene entrada sin salida'], 409);
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'No puedes registrar doble entrada: ya tienes una entrada activa',
+            ], 409);
         }
 
-        // Buscar servicio por coordenadas (radio 500 m)
+        // ── Lógica de ENTRADA ─────────────────────────────────────
+        $estadoEntrada  = null;
+        $minutosRetardo = 0;
+
+        if ($nuevoStatus === 1 && $configTurno) {
+            $horaEntrada = new \DateTime(
+                $ahora->format('Y-m-d') . ' ' . $configTurno['entrada'] . ':00',
+                new \DateTimeZone('America/Mexico_City')
+            );
+            $diffMinutos = ($ahora->getTimestamp() - $horaEntrada->getTimestamp()) / 60;
+
+            if ($diffMinutos <= 0) {
+                $estadoEntrada = 'puntual';
+            } elseif ($diffMinutos <= 15) {
+                $estadoEntrada  = 'retardo_leve';
+                $minutosRetardo = (int)$diffMinutos;
+            } else {
+                $estadoEntrada  = 'retardo_grave';
+                $minutosRetardo = (int)$diffMinutos;
+            }
+        }
+
+        // ── Incidencia retardo grave ──────────────────────────────
+        if ($estadoEntrada === 'retardo_grave') {
+            try {
+                $db->table('incidencias')->insert([
+                    'id_empleado' => $idEmpleado,
+                    'tipo'        => 'retardo',
+                    'descripcion' => "Retardo de {$minutosRetardo} minutos en entrada",
+                    'fecha'       => $ahora->format('Y-m-d'),
+                    'hora'        => $ahora->format('H:i:s'),
+                    'estatus'     => 0,
+                    'activo'      => 1,
+                    'created_at'  => $ahora->format('Y-m-d H:i:s'),
+                ]);
+            } catch (\Exception $e) {
+                log_message('error', 'Error incidencia retardo: ' . $e->getMessage());
+            }
+        }
+
+        // ── Lógica de SALIDA — bloquear si es anticipada ──────────
+        $ultimaEntrada = null;
+        if ($nuevoStatus === 2 && $configTurno) {
+            $ultimaEntrada = $db->query(
+                "SELECT id, fecha, hora FROM asistencias
+                 WHERE id_empleado = ? AND id_status = 1
+                 ORDER BY id DESC LIMIT 1",
+                [$idEmpleado]
+            )->getRowArray();
+
+            if ($ultimaEntrada) {
+                $fechaEntrada = new \DateTime(
+                    $ultimaEntrada['fecha'] . ' ' . $ultimaEntrada['hora'],
+                    new \DateTimeZone('America/Mexico_City')
+                );
+
+                $fechaSalida = clone $fechaEntrada;
+                if ($configTurno['siguiente_dia']) {
+                    $fechaSalida->modify('+1 day');
+                }
+                [$hSal, $mSal] = explode(':', $configTurno['salida']);
+                $fechaSalida->setTime((int)$hSal, (int)$mSal, 0);
+
+                $ventanaMinima = clone $fechaSalida;
+                $ventanaMinima->modify('-15 minutes');
+
+                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp()) {
+                    $minutosRestantes = (int)(($ventanaMinima->getTimestamp() - $ahora->getTimestamp()) / 60);
+                    $horas            = floor($minutosRestantes / 60);
+                    $mins             = $minutosRestantes % 60;
+
+                    // Incidencia salida anticipada
+                    try {
+                        $db->table('incidencias')->insert([
+                            'id_empleado' => $idEmpleado,
+                            'tipo'        => 'salida_anticipada',
+                            'descripcion' => "Intento de salida {$minutosRestantes} min antes del horario",
+                            'fecha'       => $ahora->format('Y-m-d'),
+                            'hora'        => $ahora->format('H:i:s'),
+                            'estatus'     => 0,
+                            'activo'      => 1,
+                            'created_at'  => $ahora->format('Y-m-d H:i:s'),
+                        ]);
+                    } catch (\Exception $e) {
+                        log_message('error', 'Error incidencia salida anticipada: ' . $e->getMessage());
+                    }
+
+                    return $this->respond([
+                        'status'  => 'bloqueado',
+                        'message' => 'No puedes registrar tu salida todavía',
+                        'data'    => [
+                            'hora_salida_valida' => $ventanaMinima->format('H:i') . ' del ' . $fechaSalida->format('d/m/Y'),
+                            'tiempo_restante'    => "{$horas}h {$mins}min",
+                            'minutos_restantes'  => $minutosRestantes,
+                        ],
+                    ], 423);
+                }
+            }
+        }
+
+        // ── Registrar asistencia ──────────────────────────────────
         $servicio   = $model->servicioMasCercano($lat, $lon, 500);
         $idServicio = (int)(($servicio['data'] ?? [])['id'] ?? 0);
 
-        // Registrar asistencia
         $asistencia = $model->registrarAsistencia(
             $idEmpleado, $lat, $lon, $ip,
             $nuevoStatus,
-            (int)$actor->id,
-            $idServicio
+            $idCapturista,
+            $idServicio,
+            [
+                'id_turno'              => $idTurno,
+                'estado_entrada'        => $estadoEntrada,
+                'minutos_retardo'       => $minutosRetardo,
+                'id_asistencia_entrada' => $nuevoStatus === 2 ? ($ultimaEntrada['id'] ?? null) : null,
+            ]
         );
 
         if ($asistencia['status'] !== 'ok') {
             return $this->respond($asistencia, 500);
         }
 
-        // Actualizar estado_actual del empleado
         $model->actualizarActividad($idEmpleado, $nuevoStatus);
 
         AuditLibrary::log(
-            (int)$actor->id,
+            $idCapturista,
             $nuevoStatus === 1 ? 'BIOMETRICO_ENTRADA' : 'BIOMETRICO_SALIDA',
             'asistencias',
             (string)$idEmpleado,
-            ($nuevoStatus === 1 ? 'Entrada' : 'Salida') . " registrada — IP: {$ip}"
+            ($nuevoStatus === 1 ? 'Entrada' : 'Salida') . " — turno: {$idTurno} — IP: {$ip}"
         );
 
-        return $this->respond($asistencia);
+        // ── Respuesta enriquecida ─────────────────────────────────
+        $response = [
+            'status'  => 'ok',
+            'tipo'    => $nuevoStatus === 1 ? 'entrada' : 'salida',
+            'mensaje' => $nuevoStatus === 1 ? 'Entrada registrada' : 'Salida registrada',
+            'data'    => [
+                'turno'           => $configTurno['tipo'] ?? 'desconocido',
+                'estado_entrada'  => $estadoEntrada,
+                'minutos_retardo' => $minutosRetardo,
+            ],
+        ];
+
+        if ($nuevoStatus === 1 && $configTurno) {
+            $horaSalida = clone $ahora;
+            if ($configTurno['siguiente_dia']) $horaSalida->modify('+1 day');
+            [$h, $m] = explode(':', $configTurno['salida']);
+            $horaSalida->setTime((int)$h, (int)$m, 0);
+            $response['data']['hora_salida_esperada'] = $horaSalida->format('H:i \d\e\l d/m/Y');
+        }
+
+        return $this->respond($response);
     }
 
+
+    /**
+     * GET /api/v1/biometrico/estado/:id?salida=0|1
+     * Verifica si el empleado puede registrar entrada/salida SIN registrar nada.
+     */
+    public function estado(int $idEmpleado): mixed
+    {
+        $esSalida = (bool)($this->request->getGet('salida') ?? false);
+        $model    = new EmpleadoModel();
+        $db       = \Config\Database::connect();
+
+        $ultima     = $model->ultimaAsistencia($idEmpleado);
+        $lastStatus = (int)(($ultima['data'] ?? [])['id_status'] ?? 0);
+
+        if (!$esSalida && $lastStatus === 1) {
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'No puedes registrar doble entrada: ya tienes una entrada activa',
+            ], 409);
+        }
+
+        if ($esSalida && $lastStatus !== 1) {
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'No puedes registrar salida: sin entrada previa',
+            ], 409);
+        }
+
+        if ($esSalida) {
+            $turno = $db->query(
+                'SELECT e.id_turno FROM empleados e WHERE e.id = ?', [$idEmpleado]
+            )->getRowArray();
+
+            $idTurno      = (int)($turno['id_turno'] ?? 0);
+            $configTurnos = [
+                1367 => ['salida' => '08:00', 'siguiente_dia' => true],
+                1382 => ['salida' => '20:00', 'siguiente_dia' => false],
+                1387 => ['salida' => '19:00', 'siguiente_dia' => false],
+                1398 => ['salida' => '08:00', 'siguiente_dia' => true],
+                1399 => ['salida' => '19:00', 'siguiente_dia' => false],
+                1400 => ['salida' => '07:00', 'siguiente_dia' => true],
+            ];
+
+            $config = $configTurnos[$idTurno] ?? null;
+            if ($config) {
+                $ultimaEntrada = $db->query(
+                    "SELECT fecha, hora FROM asistencias
+                     WHERE id_empleado = ? AND id_status = 1
+                     ORDER BY id DESC LIMIT 1",
+                    [$idEmpleado]
+                )->getRowArray();
+
+                if ($ultimaEntrada) {
+                    $ahora        = new \DateTime('now', new \DateTimeZone('America/Mexico_City'));
+                    $fechaEntrada = new \DateTime(
+                        $ultimaEntrada['fecha'] . ' ' . $ultimaEntrada['hora'],
+                        new \DateTimeZone('America/Mexico_City')
+                    );
+                    $fechaSalida = clone $fechaEntrada;
+                    if ($config['siguiente_dia']) $fechaSalida->modify('+1 day');
+                    [$h, $m] = explode(':', $config['salida']);
+                    $fechaSalida->setTime((int)$h, (int)$m, 0);
+
+                    $ventana = clone $fechaSalida;
+                    $ventana->modify('-15 minutes');
+
+                    if ($ahora->getTimestamp() < $ventana->getTimestamp()) {
+                        $mins  = (int)(($ventana->getTimestamp() - $ahora->getTimestamp()) / 60);
+                        $horas = floor($mins / 60);
+                        $minsR = $mins % 60;
+                        return $this->respond([
+                            'status'  => 'bloqueado',
+                            'message' => 'No puedes registrar tu salida todavía',
+                            'data'    => [
+                                'hora_salida_valida' => $ventana->format('H:i') . ' del ' . $fechaSalida->format('d/m/Y'),
+                                'tiempo_restante'    => "{$horas}h {$minsR}min",
+                                'minutos_restantes'  => $mins,
+                            ],
+                        ], 423);
+                    }
+                }
+            }
+        }
+
+        return $this->respond(['status' => 'ok', 'message' => 'Puede registrar']);
+    }
     /**
      * POST /api/v1/biometrico/qr/generar
      *
