@@ -551,6 +551,11 @@ class EmpleadosController extends ResourceController
         $destino    = rtrim($this->fotoBasePath, '/') . '/' . $nombreFoto;
         $rutaImg    = rtrim($this->fotoBaseUrl, '/') . '/' . $nombreFoto;
 
+        // ← Borra el archivo anterior si existe
+        if (file_exists($destino)) {
+            unlink($destino);
+        }
+
         if (!$archivo->move(dirname($destino), basename($destino))) {
             return $this->respond(['status' => 'error', 'message' => 'Error al guardar imagen'], 500);
         }
