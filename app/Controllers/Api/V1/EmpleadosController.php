@@ -36,8 +36,8 @@ class EmpleadosController extends ResourceController
 
     public function __construct()
     {
-        $this->fotoBaseUrl  = env('FOTOS_URL', 'https://arma2.com.mx/SIA/app/photos/');
-        $this->fotoBasePath = env('FOTOS_PATH', ROOTPATH . '../app/photos/');
+        $this->fotoBaseUrl  = env('FOTOS_URL',  base_url('fotos/'));
+        $this->fotoBasePath = env('FOTOS_PATH', FCPATH . 'fotos/');
     }
 
     /* ═══════════════════════════════════════════════════════════════
