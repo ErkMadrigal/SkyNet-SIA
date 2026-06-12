@@ -424,4 +424,129 @@ class BiometricoController extends ResourceController
             $model->registrosBiometrico($search, $dateFrom, $dateTo, $page, $pageSize)
         );
     }
+
+
+    /**
+     * GET /api/v1/biometrico/sync?ubicacion_id=145
+     * Devuelve empleados de una ubicación con foto para sincronización offline.
+     * Ruta pública — sin JWT (el kiosko puede no tener internet al autenticarse)
+     */
+    public function sync(): mixed
+    {
+        $ubicacionId = (int)($this->request->getGet('ubicacion_id') ?? 0);
+
+        if ($ubicacionId <= 0) {
+            return $this->respond(['status' => 'error', 'message' => 'ubicacion_id requerido'], 400);
+        }
+
+        $db = \Config\Database::connect();
+
+        $empleados = $db->query("
+            SELECT 
+                e.id,
+                CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) AS nombreCompleto,
+                e.curp,
+                e.rfc,
+                e.fotos,
+                e.id_turno,
+                e.acceso_biometrico,
+                e.id_ubicacion_principal,
+                s.servicio AS ubicacion_nombre,
+                mp.valor AS puesto
+            FROM empleados e
+            LEFT JOIN servicios s ON e.id_ubicacion_principal = s.id
+            LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+            WHERE e.id_ubicacion_principal = ?
+            AND e.estatus = 1
+            AND e.acceso_biometrico = 1
+            ORDER BY e.paterno, e.nombre
+        ", [$ubicacionId])->getResultArray();
+
+        return $this->respond([
+            'status'     => 'ok',
+            'ubicacion'  => $ubicacionId,
+            'total'      => count($empleados),
+            'empleados'  => $empleados,
+            'sync_at'    => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /**
+     * GET /api/v1/biometrico/buscar-sync?query=000178
+     * Busca un empleado individual para agregarlo manualmente al dispositivo.
+     * Ruta pública.
+     */
+    public function buscarSync(): mixed
+    {
+        $query = trim($this->request->getGet('query') ?? '');
+
+        if ($query === '') {
+            return $this->respond(['status' => 'error', 'message' => 'Se requiere un identificador'], 400);
+        }
+
+        $db = \Config\Database::connect();
+
+        $empleado = $db->query("
+            SELECT 
+                e.id,
+                CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) AS nombreCompleto,
+                e.curp,
+                e.rfc,
+                e.fotos,
+                e.id_turno,
+                e.acceso_biometrico,
+                e.id_ubicacion_principal,
+                s.servicio AS ubicacion_nombre,
+                mp.valor AS puesto
+            FROM empleados e
+            LEFT JOIN servicios s ON e.id_ubicacion_principal = s.id
+            LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+            WHERE e.estatus = 1
+            AND e.acceso_biometrico = 1
+            AND (
+                e.curp = ?
+                OR e.rfc = ?
+                OR e.nss = ?
+                OR LPAD(e.id, 6, '0') = ?
+            )
+            LIMIT 1
+        ", [$query, $query, $query, $query])->getRowArray();
+
+        if (!$empleado) {
+            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
+        }
+
+        return $this->respond(['status' => 'ok', 'data' => $empleado]);
+    }
+
+
+    /**
+     * GET /api/v1/biometrico/ubicacion-cercana?lat=19.4&lon=-99.1
+     */
+    public function ubicacionCercana(): mixed
+    {
+        $lat = (float)($this->request->getGet('lat') ?? 0);
+        $lon = (float)($this->request->getGet('lon') ?? 0);
+
+        if (!$lat || !$lon) {
+            return $this->respond(['status' => 'error', 'message' => 'lat y lon requeridos'], 400);
+        }
+
+        $model    = new EmpleadoModel();
+        $servicio = $model->servicioMasCercano($lat, $lon, 5000); // 5km radio
+
+        if (!$servicio || !isset($servicio['data']['id'])) {
+            return $this->respond(['status' => 'error', 'message' => 'No se encontró ubicación cercana'], 404);
+        }
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => [
+                'id'     => $servicio['data']['id'],
+                'nombre' => $servicio['data']['servicio'] ?? 'Ubicación encontrada',
+                'lat'    => $servicio['data']['lat'] ?? null,
+                'lon'    => $servicio['data']['lon'] ?? null,
+            ]
+        ]);
+    }
 }

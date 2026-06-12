@@ -81,6 +81,10 @@ $routes->group('api', function ($routes) {
             $routes->post('registro', 'Api\V1\BiometricoController::registro');
             $routes->get('estado/(:num)', 'Api\V1\BiometricoController::estado/$1');
 
+            $routes->get('sync',        'Api\V1\BiometricoController::sync');
+            $routes->get('buscar-sync', 'Api\V1\BiometricoController::buscarSync');
+            $routes->get('ubicacion-cercana', 'Api\V1\BiometricoController::ubicacionCercana');
+
         });
 
         /* ─────────────────────────────────────────────────
@@ -253,6 +257,8 @@ $routes->group('api', function ($routes) {
             $routes->get('zona/(:num)', 'Api\V1\DashboardController::zona/$1');
             $routes->get('control-area','Api\V1\DashboardController::controlArea');
         });
+
+        
 
     });
 });
