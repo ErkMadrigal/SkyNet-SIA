@@ -37,7 +37,21 @@ class JwtFilter implements FilterInterface
             $nivelUsuario = (int) ($decoded->data->nivel ?? 99);
 
             if ($nivelUsuario > $nivelMin) {
-                $this->jsonExit(403, 'No tienes permisos para este recurso');
+                $vistas  = (array)($decoded->data->vistas ?? []);
+                $uri     = service('request')->getUri()->getPath();
+                $partes  = explode('/', trim($uri, '/'));
+                $modulo  = $partes[2] ?? '';
+
+                log_message('debug', '[JWT] nivel usuario: ' . $nivelUsuario . ' | nivel min: ' . $nivelMin);
+                log_message('debug', '[JWT] uri: ' . $uri . ' | modulo: ' . $modulo);
+                log_message('debug', '[JWT] vistas: ' . json_encode($vistas));
+
+                $tienePermiso = array_filter($vistas, fn($v) => str_starts_with($v, $modulo . '.'));
+                log_message('debug', '[JWT] tienePermiso: ' . json_encode($tienePermiso));
+
+                if (empty($tienePermiso)) {
+                    $this->jsonExit(403, 'No tienes permisos para este recurso');
+                }
             }
         }
 

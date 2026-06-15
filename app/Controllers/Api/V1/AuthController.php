@@ -81,11 +81,11 @@ class AuthController extends ResourceController
         }
 
         // Vistas permitidas para el frontend
-        $vistas = $model->vistasDelRol((int)$usuario['id_rol_sistema']);
-
+        $vistas = $model->vistasDelUsuario((int)$usuario['id'], (int)$usuario['id_rol_sistema']);
+        
         // Generar par de tokens
         $jwt    = new JwtLibrary();
-        $tokens = $jwt->generarPar($usuario, $empresas);
+        $tokens = $jwt->generarPar($usuario, $empresas, $vistas); 
 
         // Audit log
         AuditLibrary::log(

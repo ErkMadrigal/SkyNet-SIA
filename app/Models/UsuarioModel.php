@@ -154,4 +154,31 @@ class UsuarioModel extends Model
 
         return array_column($rows, 'slug');
     }
+
+
+    public function vistasDelUsuario(int $idUsuario, int $idRol): array
+    {
+        // Vistas base del rol
+        $vistasRol = $this->db->query("
+            SELECT v.slug FROM vista_permisos vp
+            JOIN vistas v ON v.id = vp.id_vista
+            WHERE vp.id_rol = ? AND vp.activo = 1 AND v.activo = 1
+        ", [$idRol])->getResultArray();
+
+        // Permisos individuales — JOIN directo con vistas por módulo + permiso
+        $vistasIndividuales = $this->db->query("
+            SELECT v.slug
+            FROM permiso_rol_empleados pre
+            JOIN roles r ON r.id = pre.id_rol
+            JOIN vistas v ON v.modulo = r.tipo AND v.id_permiso = pre.id_permiso
+            WHERE pre.id_empleado = ? AND v.activo = 1
+        ", [$idUsuario])->getResultArray();
+
+        $slugs = array_merge(
+            array_column($vistasRol, 'slug'),
+            array_column($vistasIndividuales, 'slug')
+        );
+
+        return array_values(array_unique($slugs));
+    }
 }

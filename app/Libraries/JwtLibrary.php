@@ -52,7 +52,7 @@ class JwtLibrary
      * @param  array $empresas IDs de empresas que puede ver este usuario
      * @return array{access_token:string, refresh_token:string, expires_in:int, token_type:string}
      */
-    public function generarPar(array $usuario, array $empresas = []): array
+    public function generarPar(array $usuario, array $empresas = [], array $vistas = []): array
     {
         $jti = Uuid::uuid4()->toString();
         $now = time();
@@ -80,6 +80,7 @@ class JwtLibrary
                 'nivel'           => $nivel,
                 'empresa_default' => $usuario['id_empresa_default'] ?? null,
                 'empresas'        => $empresas,
+                'vistas'    => $vistas,
             ],
         ];
 
