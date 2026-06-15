@@ -191,7 +191,10 @@ class JwtLibrary
             throw new \RuntimeException('Usuario no disponible');
         }
 
-        return $this->generarPar($usuario, $empresas);
+        $usuarioModel2 = new \App\Models\UsuarioModel();
+        $vistas = $usuarioModel2->vistasDelUsuario((int)$usuario['id'], (int)$usuario['id_rol_sistema']);
+
+        return $this->generarPar($usuario, $empresas, $vistas);
     }
 
     /* ─────────────────────────────────────────
