@@ -162,10 +162,39 @@ class UsuarioSistemaModel extends Model
      */
     public function generarUsername(string $nombre, string $paterno, string $materno): string
     {
-        $n = iconv('UTF-8', 'ASCII//TRANSLIT', strtolower(trim($nombre)));
-        $p = iconv('UTF-8', 'ASCII//TRANSLIT', strtolower(trim($paterno)));
-        $m = iconv('UTF-8', 'ASCII//TRANSLIT', strtolower(trim($materno)));
-        return substr($n, 0, 1) . '.' . $p . '.' . substr($m, 0, 1);
+        $normalize = fn($s) => preg_replace('/[^a-z.]/', '', 
+            iconv('UTF-8', 'ASCII//TRANSLIT', strtolower(trim($s)))
+        );
+
+        $partesNombre = array_filter(explode(' ', $normalize($nombre)));
+        $p = $normalize($paterno);
+        $m = $normalize($materno);
+
+        // Filtra artículos comunes
+        $articulos = ['de', 'del', 'la', 'los', 'las', 'el', 'y'];
+        $partesNombre = array_values(array_filter($partesNombre, fn($w) => !in_array($w, $articulos)));
+
+        // Construye: inicial_1 + todas_las_partes_del_nombre + paterno + inicial_materno
+        $inicialPrimero = substr($partesNombre[0], 0, 1);
+        $restoNombre    = array_slice($partesNombre, 1); // ["lourdes", "perla"]
+
+        $partes = [$inicialPrimero];
+        foreach ($restoNombre as $parte) {
+            $partes[] = $parte;
+        }
+        $partes[] = $p;
+        $partes[] = substr($m, 0, 1);
+
+        $username = implode('.', $partes);
+
+        // Si aún existe, agrega inicial del materno completo
+        if (!empty($this->getUsr($username)['data'])) {
+            $username = implode('.', array_merge(
+                array_slice($partes, 0, -1), [$m]
+            ));
+        }
+
+        return $username;
     }
 
     /** Registra un nuevo usuario del sistema. */

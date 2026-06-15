@@ -57,6 +57,12 @@ class JwtLibrary
         $jti = Uuid::uuid4()->toString();
         $now = time();
 
+        // ── Obtener nivel real del rol ────────────────────────────────
+        $db    = \Config\Database::connect();
+        $rol   = $db->query('SELECT nivel, slug FROM rol WHERE id = ?', [(int)$usuario['id_rol_sistema']])->getRowArray();
+        $nivel = (int)($rol['nivel'] ?? 3);
+        $slug  = $rol['slug'] ?? 'operador';
+
         // ── Access Token ──────────────────────────────────────────────
         $accessPayload = [
             'iss'  => env('APP_BASEURL', 'SkyNet-SIA'),
@@ -65,15 +71,15 @@ class JwtLibrary
             'jti'  => $jti,
             'sub'  => (int) $usuario['id'],
             'data' => [
-                'id'          => (int)    $usuario['id'],
-                'name_user'   => $usuario['name_user'],
-                'nombre'      => trim("{$usuario['nombre']} {$usuario['paterno']} {$usuario['materno']}"),
-                'correo'      => $usuario['correo'],
-                'rol'         => (int)    $usuario['id_rol_sistema'],
-                'rol_slug'    => $usuario['rol_slug']    ?? 'operador',
-                'nivel'       => (int)   ($usuario['nivel']          ?? 3),
+                'id'              => (int) $usuario['id'],
+                'name_user'       => $usuario['name_user'],
+                'nombre'          => trim("{$usuario['nombre']} {$usuario['paterno']} {$usuario['materno']}"),
+                'correo'          => $usuario['correo'],
+                'rol'             => (int) $usuario['id_rol_sistema'],
+                'rol_slug'        => $slug,
+                'nivel'           => $nivel,
                 'empresa_default' => $usuario['id_empresa_default'] ?? null,
-                'empresas'    => $empresas,
+                'empresas'        => $empresas,
             ],
         ];
 

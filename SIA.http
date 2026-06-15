@@ -12,8 +12,8 @@
 # @base_ping = https://serprosep.vinculasag.com/api/ping
 
 @apikey   = k8sd7f9a2v1b4mzqp0xlj5ngtu3wrceh
-@token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzc4OTA4NDE5LCJleHAiOjE3Nzg5MTIwMTksImp0aSI6IjhjYTM2NzU5LTVmYTUtNDNmNi04ODEzLThlMzI0OTkzZTU5NyIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdfX0.w4_6HhP2dWPMcLQWAcLX7-1f4QRifLhMp0TjbgK0hDc
-@refresh  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTSUEtYXBpIiwiaWF0IjoxNzc4MDQzODQwLCJleHAiOjE3Nzg2NDg2NDAsImp0aSI6ImE4NjU0OTVmLWIyMTQtNDliYi1iMjUxLWZmNDMwNWRkZmRlYiIsInN1YiI6MSwidG9rZW5fdHlwZSI6InJlZnJlc2gifQ.PhYdi6TxHPqkKoK1DXyZMPn41D9wkOky5Z6o6yxQ368
+@token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzgxMzAwOTYyLCJleHAiOjE3ODEzMDQ1NjIsImp0aSI6IjU3Zjc2YWVjLTZmYjYtNGE5My04ZGM0LWZhZTFjYmE2NmYwNCIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdfX0.8szToispp3YOZ3FAi4hVkqtpj1mDpVEzOKBnplQvYf8
+@refresh  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzgxMzAwOTYyLCJleHAiOjE3ODE5MDU3NjIsImp0aSI6IjU3Zjc2YWVjLTZmYjYtNGE5My04ZGM0LWZhZTFjYmE2NmYwNCIsInN1YiI6MSwidG9rZW5fdHlwZSI6InJlZnJlc2gifQ.LIb2YIWVC0Yn82pbwVqwtd4U-U-S-7DrJ_yvi3R4qdM
 
 
 
@@ -30,13 +30,13 @@ GET {{base_ping}} HTTP/1.1
 #  AUTH
 # ════════════════════════════════════════════════════════════
 
-### 1. LOGIN — obtiene access_token + refresh_token
+### 1. LOGIN — obtiene access_token + refresh_token admin = SuperAdmin / supersegura123
 POST {{base}}/auth/login HTTP/1.1
 Content-Type: application/json
 
 {
-  "name_user": "SuperAdmin",
-  "password": "supersegura123"
+  "name_user": "c.rosado.c",
+  "password": "559207"
 }
 
 
@@ -924,3 +924,14 @@ Content-Type: application/json
   ]
 }
 
+
+### 88. obtener info usuarios
+
+GET {{base}}/biometrico/sync?ubicacion_id=145
+
+### 89 obtener info usuario específico por query
+GET {{base}}/biometrico/buscar-sync?query=000178
+
+
+### 90 obtener la ubicacion del telefono 
+GET {{base}}/biometrico/ubicacion-cercana?lat=19.4326&lon=-99.1332
