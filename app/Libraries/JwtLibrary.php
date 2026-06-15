@@ -59,7 +59,7 @@ class JwtLibrary
 
         // ── Obtener nivel real del rol ────────────────────────────────
         $db    = \Config\Database::connect();
-        $rol   = $db->query('SELECT nivel, slug FROM rol WHERE id = ?', [(int)$usuario['id_rol_sistema']])->getRowArray();
+        $rol = $db->query('SELECT nivel, slug FROM rol_sistema WHERE id = ?', [(int)$usuario['id_rol_sistema']])->getRowArray();
         $nivel = (int)($rol['nivel'] ?? 3);
         $slug  = $rol['slug'] ?? 'operador';
 
