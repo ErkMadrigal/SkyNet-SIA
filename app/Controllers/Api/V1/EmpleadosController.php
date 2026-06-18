@@ -146,6 +146,17 @@ class EmpleadosController extends ResourceController
     {
         $actor = $this->request->jwtUser;
 
+        // Limpia la interbancaria antes de validar (puede venir con guiones de formato)
+        $interbancariaLimpia = preg_replace('/\D/', '', $this->request->getVar('interbancaria') ?? '');
+
+        if (strlen($interbancariaLimpia) !== 18) {
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Datos inválidos',
+                'errors'  => ['interbancaria' => 'La clave interbancaria debe tener 18 dígitos'],
+            ], 422);
+        }
+
         $rules = [
             'curp'              => 'required|max_length[20]',
             'rfc'               => 'required|max_length[15]',
@@ -154,7 +165,6 @@ class EmpleadosController extends ResourceController
             'paterno'           => 'required|max_length[255]',
             'materno'           => 'permit_empty|max_length[255]',
             'nombre'            => 'required|max_length[255]',
-            'interbancaria'     => 'required|exact_length[18]|numeric',
             'turno'             => 'required',
             'puesto'            => 'required',
             'periodicidad'      => 'required',
@@ -206,7 +216,7 @@ class EmpleadosController extends ResourceController
             'id_turno'           => $this->request->getVar('turno'),
             'id_puesto'          => $this->request->getVar('puesto'),
             'id_periocidad'      => $this->request->getVar('periodicidad'),
-            'clave_interbancaria' => preg_replace('/\D/', '', $this->request->getVar('interbancaria')),
+            'clave_interbancaria' => $interbancariaLimpia,
             'id_banco'           => $this->request->getVar('institucionBancaria') ?? null,
             'estatus'            => 1,
             'alergias'           => $this->request->getVar('alergias') ?: 'N/A',
