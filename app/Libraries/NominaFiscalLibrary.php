@@ -35,6 +35,13 @@ class NominaFiscalLibrary
     private const UMA_DIARIA             = 113.14;
     private const EXENCION_PREVISION_SOC = 4.00;
 
+        // ── Sueldo fiscal FIJO — validado contra Excel maestro ──────────────
+    // TODOS los empleados usan este sueldo de referencia para el cálculo
+    // fiscal (SD, SDI, ISR, IMSS, Subsidio), sin importar su sueldo tabulador
+    // real por puesto/zona. La diferencia entre el pago real y el neto
+    // fiscal se absorbe en la IAS.
+    public const SUELDO_FISCAL_FIJO = 4750.00;
+
     // Tasas IMSS obreras (LSS)
     private const IMSS_EXCEDENTE_OBR        = 0.004;
     private const IMSS_PRESTACIONES_DIN_OBR = 0.0025;
@@ -72,38 +79,29 @@ class NominaFiscalLibrary
      * @param int   $diasLaborados    Días efectivos del periodo (1-15)
      */
     public static function calcular(
-        float $sueldoTabulador,
+        float $sueldoTabulador,   // ya no se usa para SD — se ignora, ver nota abajo
         float $sueldoNetoPagar,
         int   $diasLaborados   = 15,
-        float $descInfonavit   = 0.0,   // NUEVO
-        float $descFonacot     = 0.0,   // NUEVO
-        float $descPension     = 0.0    // NUEVO
+        float $descInfonavit   = 0.0,
+        float $descFonacot     = 0.0,
+        float $descPension     = 0.0
     ): array
     {
-        // ── SD: usa sueldo gravado (sueldo - exención previsión social) ──
-        [$sd, $sdi] = self::calcularSdSdi($sueldoTabulador);
+        // El SD/SDI SIEMPRE se calculan sobre el sueldo fiscal fijo,
+        // nunca sobre el sueldo tabulador real del empleado.
+        [$sd, $sdi] = self::calcularSdSdi(self::SUELDO_FISCAL_FIJO);
 
-        // ── BI: ingreso quincenal proporcional a días laborados ──────────
         $bi = round($sd * $diasLaborados, 2);
-
-        // ── Base ISR mensual: SIEMPRE SD * 30.4, independiente de días ──
         $baseMensualIsr = $sd * 30.4;
 
-        // ── ISR y Subsidio prorratados al periodo ────────────────────────
-        $isr = self::calcularIsr($baseMensualIsr, $diasLaborados);
-
-        // ── IMSS cuota obrera proporcional a días ────────────────────────
+        $isr  = self::calcularIsr($baseMensualIsr, $diasLaborados);
         $imss = self::calcularImssObrero($sdi, $diasLaborados);
 
-        // ── Neto fiscal = BI - IMSS - ISR_neto - INFONAVIT - FONACOT - PENSION ──
-        // (validado contra Excel maestro: el neto fiscal SÍ absorbe las
-        // deducciones fijas, no solo IMSS/ISR — la IAS es lo que queda después)
         $netoFiscal = max(0, round(
             $bi - $imss['total'] - $isr['isr_neto']
                 - $descInfonavit - $descFonacot - $descPension
         , 2));
 
-        // ── IAS = Neto_pagar - Neto_fiscal ──────────────────────────────
         $ias             = round($sueldoNetoPagar - $netoFiscal, 2);
         $totalDispersion = round($sueldoNetoPagar, 2);
 
@@ -118,9 +116,9 @@ class NominaFiscalLibrary
             'isr_bruto'         => $isr['isr_bruto'],
             'subsidio_empleo'   => $isr['subsidio'],
             'isr_neto'          => $isr['isr_neto'],
-            'desc_infonavit'    => round($descInfonavit, 2), // NUEVO — para trazabilidad
-            'desc_fonacot'      => round($descFonacot, 2),   // NUEVO
-            'desc_pension'      => round($descPension, 2),   // NUEVO
+            'desc_infonavit'    => round($descInfonavit, 2),
+            'desc_fonacot'      => round($descFonacot, 2),
+            'desc_pension'      => round($descPension, 2),
             'neto_fiscal'       => $netoFiscal,
             'ias'               => $ias,
             'total_dispersion'  => $totalDispersion,
@@ -172,7 +170,7 @@ class NominaFiscalLibrary
     }
 
     /** SD y SDI a partir del sueldo tabulador — misma fórmula que usa calcular() */
-    private static function calcularSdSdi(float $sueldoTabulador): array
+     private static function calcularSdSdi(float $sueldoTabulador): array
     {
         $sueldoGravado = $sueldoTabulador - self::EXENCION_PREVISION_SOC;
         $sd  = $sueldoGravado / 15;

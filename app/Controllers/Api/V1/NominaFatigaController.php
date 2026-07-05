@@ -1585,14 +1585,14 @@ class NominaFatigaController extends ResourceController
         ));
 
         // ── Cálculo fiscal (ISR, IMSS, Subsidio, IAS) ────────────────
+        // El bloque fiscal SIEMPRE usa el sueldo fiscal FIJO ($4,750),
+        // nunca el sueldo tabulador real — la diferencia la absorbe la IAS.
         $diasPagados   = (int)($calculo['dias_pagados'] ?? 15);
         $tieneAltaBaja = ($calculo['conteo_alta'] ?? 0) > 0
-                        || ($calculo['conteo_baja'] ?? 0) > 0
-                        || ($calculo['es_baja'] ?? false);
+                    || ($calculo['conteo_baja'] ?? 0) > 0
+                    || ($calculo['es_baja'] ?? false);
 
-        // Días fiscales = 15 - F - PSS - A - B (fórmula exacta del Excel maestro,
-        // columna "DIAS LABORADOS"). I y V NO restan — se quedan dentro del pool
-        // de 15 días fiscales, igual que ya validamos antes.
+        // Días fiscales = 15 - F - PSS - A - B (fórmula validada del maestro)
         $diasFiscales = max(0, 15
             - ($calculo['conteo_faltas'] ?? 0)
             - ($calculo['conteo_pss']    ?? 0)
@@ -1600,13 +1600,21 @@ class NominaFatigaController extends ResourceController
             - ($calculo['conteo_baja']   ?? 0)
         );
 
-        $sd = ($sueldoTabuladorBase - 4.0) / 15;
+        // FIX: si el pago real ya se topó en 0 (+3 faltas que superan lo
+        // trabajado, o baja real sin días trabajados), el fiscal TAMBIÉN
+        // debe ser 0 completo — no solo el pago, todo el bloque fiscal.
+        if ($tieneAltaBaja && ($calculo['sueldo_semanal'] ?? 0) <= 0) {
+            $diasFiscales = 0;
+        }
+
+        $sdFijo = (\App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO - 4.0) / 15; // 316.40
+
         $sueldoNetoPagarFiscal = $tieneAltaBaja
-            ? round($sd * $diasFiscales, 2)
+            ? round($sdFijo * $diasFiscales, 2)
             : $totalFinal;
 
         $fiscal = \App\Libraries\NominaFiscalLibrary::calcular(
-            $sueldoTabuladorBase,
+            \App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO,
             $sueldoNetoPagarFiscal,
             $diasFiscales,
             $descInfonavit,
