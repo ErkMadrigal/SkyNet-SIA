@@ -232,4 +232,67 @@ class ReportesController extends ResourceController
 
         return $this->respond((new TabuladorModel())->setEstatus((int)$id, $estatus));
     }
+
+    /**
+     * PUT /api/v1/tabulador/{id}
+     * Body: { id_zona, nombre, vigencia_inicio, vigencia_fin?, estatus }
+     * Agregar esta ruta en Routes.php dentro del grupo 'tabulador':
+     *   $routes->put('(:num)', 'Api\V1\ReportesController::update/$1');
+     */
+    public function update($id = null): mixed
+    {
+        $rules = [
+            'id_zona'         => 'required|integer',
+            'nombre'          => 'permit_empty|max_length[120]',
+            'vigencia_inicio' => 'required|valid_date[Y-m-d]',
+            'estatus'         => 'permit_empty|in_list[0,1]',
+        ];
+
+        if (!$this->validate($rules)) {
+            return $this->respond(['status' => 'error', 'errors' => $this->validator->getErrors()], 422);
+        }
+
+        $model = new TabuladorModel();
+        return $this->respond($model->actualizar(
+            (int)$id,
+            (int)$this->request->getVar('id_zona'),
+            $this->request->getVar('nombre') ?? '',
+            $this->request->getVar('vigencia_inicio'),
+            $this->request->getVar('vigencia_fin'),
+            (int)($this->request->getVar('estatus') ?? 1)
+        ));
+    }
+
+    /**
+     * POST /api/v1/tabulador/{id}/duplicar
+     * Body: { id_zona, nombre, vigencia_inicio, vigencia_fin? }
+     * Clona el tabulador {id} (origen) con todos sus items activos,
+     * pero con la nueva zona/nombre/vigencia que envíes.
+     *
+     * Agregar esta ruta en Routes.php dentro del grupo 'tabulador':
+     *   $routes->post('(:num)/duplicar', 'Api\V1\ReportesController::duplicar/$1');
+     */
+    public function duplicar($id = null): mixed
+    {
+        $rules = [
+            'id_zona'         => 'required|integer',
+            'nombre'          => 'permit_empty|max_length[120]',
+            'vigencia_inicio' => 'required|valid_date[Y-m-d]',
+        ];
+
+        if (!$this->validate($rules)) {
+            return $this->respond(['status' => 'error', 'errors' => $this->validator->getErrors()], 422);
+        }
+
+        $model = new TabuladorModel();
+        $res = $model->duplicar(
+            (int)$id,
+            (int)$this->request->getVar('id_zona'),
+            $this->request->getVar('nombre') ?? '',
+            $this->request->getVar('vigencia_inicio'),
+            $this->request->getVar('vigencia_fin')
+        );
+
+        return $this->respond($res, $res['status'] === 'ok' ? 201 : 422);
+    }
 }

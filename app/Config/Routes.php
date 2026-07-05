@@ -43,6 +43,32 @@ $routes->group('api', function ($routes) {
             $routes->get('empleados-zona',     'Api\V1\NominaController::empleadosPorZona');
         });
 
+        $routes->group('nomina-fatiga', ['filter' => 'jwt'], function ($routes) {
+            $routes->get('/',                       'Api\V1\NominaFatigaController::index');
+            $routes->get('(:num)',                  'Api\V1\NominaFatigaController::show/$1');
+            $routes->post('procesar',               'Api\V1\NominaFatigaController::procesar');
+            $routes->put('(:num)/detalle/(:num)',   'Api\V1\NominaFatigaController::actualizarDetalle/$1/$2');
+            $routes->post('(:num)/aprobar',         'Api\V1\NominaFatigaController::aprobar/$1',   ['filter' => 'jwt:admin']);
+            $routes->post('(:num)/rechazar',        'Api\V1\NominaFatigaController::rechazar/$1',  ['filter' => 'jwt:admin']);
+            $routes->get('(:num)/dispersion',       'Api\V1\NominaFatigaController::dispersion/$1');
+            $routes->post('procesar-asistencia', 'Api\V1\NominaFatigaController::procesarAsistencia');
+            
+            $routes->post('iniciar-asistencia',        'Api\V1\NominaFatigaController::iniciarAsistencia');
+            $routes->post('(:num)/procesar-chunk',     'Api\V1\NominaFatigaController::procesarChunk/$1');
+            $routes->post('procesar-xlsm', 'Api\V1\NominaFatigaController::procesarXlsm');
+
+
+        });
+
+        $routes->group('deducciones', ['filter' => 'jwt:admin'], function ($routes) {
+            $routes->post('fonacot',   'Api\V1\DeduccionesController::fonacot');
+            $routes->post('infonavit', 'Api\V1\DeduccionesController::infonavit');
+            $routes->post('pension',   'Api\V1\DeduccionesController::pension');
+            $routes->get('/',          'Api\V1\DeduccionesController::index');
+            $routes->get('resumen',    'Api\V1\DeduccionesController::resumen');
+            $routes->delete('(:num)',  'Api\V1\DeduccionesController::delete/$1');
+        });
+
         /* ─────────────────────────────────────────────────
            AUTH — Rutas públicas (no requieren JWT)
         ───────────────────────────────────────────────── */
@@ -160,6 +186,8 @@ $routes->group('api', function ($routes) {
             $routes->delete('item/(:num)',   'Api\V1\ReportesController::deshabilitarItem/$1');
             $routes->patch('(:num)/estatus', 'Api\V1\ReportesController::setEstatus/$1');
             $routes->put('(:num)',           'Api\V1\ReportesController::update/$1');
+            $routes->post('(:num)/duplicar', 'Api\V1\ReportesController::duplicar/$1');
+
         });
 
         /* ─────────────────────────────────────────────────

@@ -47,7 +47,36 @@ class BiometricoController extends ResourceController
             return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado, verifica tu identificador'], 404);
         }
 
-        return $this->respond(['status' => 'ok', 'data' => $existe]);
+        // ── Buscar si el empleado tiene usuario ligado ────────────────
+        $db       = \Config\Database::connect();
+        $operador = $db->query("
+            SELECT u.id, u.name_user, u.id_rol_sistema, u.estatus,
+                rs.nivel, rs.slug AS rol_slug
+            FROM usuario u
+            INNER JOIN rol_sistema rs ON rs.id = u.id_rol_sistema
+            WHERE u.id_empleado = ?
+            AND u.estatus = 1
+            AND u.is_deleted = 0
+            LIMIT 1
+        ", [(int)$existe['id']])->getRowArray();
+
+        $vistas = [];
+        if ($operador) {
+            $usuarioModel = new \App\Models\UsuarioModel();
+            $vistas = $usuarioModel->vistasDelUsuario((int)$operador['id'], (int)$operador['id_rol_sistema']);
+        }
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => $existe,
+            'operador' => $operador ? [
+                'id'       => (int)$operador['id'],
+                'username' => $operador['name_user'],
+                'rol'      => $operador['rol_slug'],
+                'nivel'    => (int)$operador['nivel'],
+                'vistas'   => $vistas,
+            ] : null,
+        ]);
     }
 
     /**

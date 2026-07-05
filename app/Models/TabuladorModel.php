@@ -32,10 +32,15 @@ class TabuladorModel extends Model
         return ['status' => 'ok', 'data' => $rows];
     }
 
+    /**
+     * Lista todos los tabuladores con el conteo real de items activos.
+     */
     public function listar(): array
     {
         $rows = $this->db->query("
-            SELECT t.*, z.zona
+            SELECT t.*, z.zona,
+                   (SELECT COUNT(*) FROM tabulador_salarios_detalle tsd
+                    WHERE tsd.id_tabulador = t.id AND tsd.estatus = 1) AS items
             FROM tabulador_salarios t
             LEFT JOIN zonas z ON z.id = t.id_zona
             ORDER BY t.id DESC
@@ -54,6 +59,22 @@ class TabuladorModel extends Model
                 'estatus'         => 1,
             ], true);
             return ['status' => 'ok', 'mensaje' => 'Tabulador creado', 'id' => $id];
+        } catch (\Exception $e) {
+            return ['status' => 'error', 'mensaje' => $e->getMessage()];
+        }
+    }
+
+    public function actualizar(int $id, int $idZona, string $nombre, string $vigenciaInicio, ?string $vigenciaFin, int $estatus): array
+    {
+        try {
+            $this->update($id, [
+                'id_zona'         => $idZona,
+                'nombre'          => $nombre,
+                'vigencia_inicio' => $vigenciaInicio,
+                'vigencia_fin'    => $vigenciaFin,
+                'estatus'         => $estatus,
+            ]);
+            return ['status' => 'ok', 'mensaje' => 'Tabulador actualizado'];
         } catch (\Exception $e) {
             return ['status' => 'error', 'mensaje' => $e->getMessage()];
         }
@@ -99,7 +120,7 @@ class TabuladorModel extends Model
                 return ['status' => 'ok', 'mensaje' => 'Ítem actualizado', 'id' => $existe['id']];
             }
 
-            $id = $this->db->table('tabulador_salarios_detalle')->insert([
+            $this->db->table('tabulador_salarios_detalle')->insert([
                 'id_tabulador' => $idTabulador,
                 'id_puesto'    => $idPuesto,
                 'sueldo'       => $sueldo,
@@ -134,5 +155,56 @@ class TabuladorModel extends Model
         } catch (\Exception $e) {
             return ['status' => 'error', 'mensaje' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Duplica un tabulador existente junto con todos sus items activos.
+     * El nuevo tabulador queda con nueva zona/nombre/vigencia, pero los
+     * items (puesto, sueldo, bono, descuento) se clonan tal cual.
+     */
+    public function duplicar(int $idOrigen, int $idZona, string $nombre, string $vigenciaInicio, ?string $vigenciaFin): array
+    {
+        $origen = $this->find($idOrigen);
+        if (!$origen) {
+            return ['status' => 'error', 'mensaje' => 'Tabulador origen no encontrado'];
+        }
+
+        $itemsOrigen = $this->db->table('tabulador_salarios_detalle')
+            ->where('id_tabulador', $idOrigen)
+            ->where('estatus', 1)
+            ->get()->getResultArray();
+
+        $this->db->transStart();
+
+        $nuevoId = $this->insert([
+            'id_zona'         => $idZona,
+            'nombre'          => $nombre,
+            'vigencia_inicio' => $vigenciaInicio,
+            'vigencia_fin'    => $vigenciaFin,
+            'estatus'         => 1,
+        ], true);
+
+        foreach ($itemsOrigen as $item) {
+            $this->db->table('tabulador_salarios_detalle')->insert([
+                'id_tabulador' => $nuevoId,
+                'id_puesto'    => $item['id_puesto'],
+                'sueldo'       => $item['sueldo'],
+                'bono'         => $item['bono'],
+                'descuento'    => $item['descuento'],
+                'estatus'      => 1,
+            ]);
+        }
+
+        $this->db->transComplete();
+
+        if ($this->db->transStatus() === false) {
+            return ['status' => 'error', 'mensaje' => 'Error al duplicar el tabulador'];
+        }
+
+        return [
+            'status'  => 'ok',
+            'mensaje' => 'Tabulador duplicado con ' . count($itemsOrigen) . ' item(s)',
+            'id'      => $nuevoId,
+        ];
     }
 }
