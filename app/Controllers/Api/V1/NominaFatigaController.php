@@ -1097,11 +1097,14 @@ class NominaFatigaController extends ResourceController
         $sueldoBase = (float)$tabulador['sueldo'];
         $bono       = (float)$tabulador['bono'];
 
-        // SD = "salario diario" fiscal, con exención de previsión social ($4/quincena).
-        // Es la misma base que usan las reglas de F, PSS y 24E/12E.
-        $sd = ($sueldoBase - 4.0) / 15;
+        // Dos bases de cálculo distintas:
+        // - $sd: usado para descuentos (F, PSS) — con exención de $4
+        // - $salarioDiarioCrudo: usado para dobletes (24E, 12E) — sin exención
+        $sd                 = ($sueldoBase - 4.0) / 15;
+        $salarioDiarioCrudo = round($sueldoBase / 15, 6);
 
         // Tope a 15 días — ignorar día 16 si el archivo lo trae
+        // ⚠️ PENDIENTE de confirmar dirección (¿primeros 15 o últimos 15?)
         $diasArray = array_slice(array_values($dias), 0, 15);
 
         $conteoFaltas      = 0;
@@ -1133,15 +1136,17 @@ class NominaFatigaController extends ResourceController
             }
         }
 
-        // Detectar turno por mayoría de códigos
+        // Detectar turno por mayoría de códigos (solo se usa para el descuento de falta)
         $esTurno24 = $conteo24 >= $conteo12;
 
-        // Factores según turno
-        $factorDescuento = $esTurno24 ? 4 : 2; // 24x24=4x, 12x12=2x (SOLO para F real, punitivo)
-        $factorDoblete   = $esTurno24 ? 2 : 1; // 24E=2x,   12E=1x
+        // Factor de descuento por falta — SÍ depende del turno detectado
+        $factorDescuento = $esTurno24 ? 4 : 2; // 24x24=4x, 12x12=2x
+
+        // Factores de doblete — FIJOS por código, NO dependen del turno del empleado
+        $FACTOR_24E = 2; // 24E siempre paga 2x salario diario extra
+        $FACTOR_12E = 1; // 12E siempre paga 1x salario diario extra
 
         // Días trabajados/pagados = turnos reales + descanso (par del turno).
-        // PSS, F, A, B NO se cuentan aquí.
         $diasTrabajados = $conteo24 + $conteo12 + $conteo24e + $conteo12e + $conteoDescanso;
 
         $totalFaltas = $conteoFaltas + $conteoPss;
@@ -1152,11 +1157,10 @@ class NominaFatigaController extends ResourceController
         ];
 
         // ── Baja real (código B) ──────────────────────────────────────────
-        // Solo paga días trabajados, sin descuento por falta.
         if ($conteoBaja > 0) {
             $sueldoPagado = max(0, round($sd * $diasTrabajados, 2));
-            $tiempoExtra  = $sd * $factorDoblete * $conteo24e
-                        + $sd * $factorDoblete * $conteo12e;
+            $tiempoExtra  = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
+                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
 
             return array_merge([
                 'sueldo_base'      => round($sueldoBase, 2),
@@ -1177,13 +1181,12 @@ class NominaFatigaController extends ResourceController
         }
 
         // ── Más de 3 faltas (F+PSS juntas) = baja no avisada ─────────────
-        // Descuenta TODAS las faltas reales (no solo 3).
         if ($totalFaltas > 3) {
             $sueldoDiasTrabajados = round($sd * $diasTrabajados, 2);
             $descuentoTotalFaltas = $sd * $factorDescuento * $totalFaltas;
             $sueldoPagado         = max(0, round($sueldoDiasTrabajados - $descuentoTotalFaltas, 2));
-            $tiempoExtra          = $sd * $factorDoblete * $conteo24e
-                                + $sd * $factorDoblete * $conteo12e;
+            $tiempoExtra          = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
+                                + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
 
             return array_merge([
                 'sueldo_base'      => round($sueldoBase, 2),
@@ -1204,19 +1207,17 @@ class NominaFatigaController extends ResourceController
         }
 
         // ── PSS presente (con o sin F real, pero ≤3 incidencias en total) ──
-        // PSS: proporcional, sin multiplicador punitivo.
-        // F real (si la hay junto con PSS): sí lleva su multiplicador de siempre.
         if ($conteoPss > 0) {
-            $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas; // solo si hay F real además del PSS
-            $tiempoExtra      = $sd * $factorDoblete * $conteo24e
-                            + $sd * $factorDoblete * $conteo12e;
+            $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
+            $tiempoExtra      = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
+                            + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
 
             $sueldoPagado = max(0, round($sd * $diasTrabajados - $descuentoFaltas, 2));
 
             return array_merge([
                 'sueldo_base'      => round($sueldoBase, 2),
                 'sueldo_semanal'   => round($sueldoPagado, 2), // controller suma tiempo_extra/bono aparte
-                'bono'             => 0, // PSS pierde bono, igual que falta
+                'bono'             => 0,
                 'tiempo_extra'     => round($tiempoExtra, 2),
                 'descuento_faltas' => round($descuentoFaltas, 2),
                 'es_baja'          => false,
@@ -1234,16 +1235,15 @@ class NominaFatigaController extends ResourceController
         // ── Normal: 0 a 3 faltas reales, sin PSS ──────────────────────────
         $bonoAplicado    = ($conteoFaltas === 0) ? $bono : 0.0;
         $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
-        $tiempoExtra     = $sd * $factorDoblete * $conteo24e
-                        + $sd * $factorDoblete * $conteo12e;
+        $tiempoExtra     = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
+                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
 
-        // Sueldo siempre completo — IAS absorbe diferencias
         $sueldoPagado = max(0, round($sueldoBase + $bonoAplicado + $tiempoExtra
                         - $descuentoFaltas, 2));
 
         return array_merge([
             'sueldo_base'      => round($sueldoBase, 2),
-            'sueldo_semanal'   => round($sueldoBase, 2), // siempre base para fiscal
+            'sueldo_semanal'   => round($sueldoBase, 2),
             'bono'             => round($bonoAplicado, 2),
             'tiempo_extra'     => round($tiempoExtra, 2),
             'descuento_faltas' => round($descuentoFaltas, 2),
