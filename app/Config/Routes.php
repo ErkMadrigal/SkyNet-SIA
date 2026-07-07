@@ -57,6 +57,7 @@ $routes->group('api', function ($routes) {
             $routes->post('(:num)/procesar-chunk',     'Api\V1\NominaFatigaController::procesarChunk/$1');
             $routes->post('procesar-xlsm', 'Api\V1\NominaFatigaController::procesarXlsm');
 
+            $routes->get('(:num)/dispersion', 'Api\V1\NominaFatigaController::dispersion/$1');
 
         });
 

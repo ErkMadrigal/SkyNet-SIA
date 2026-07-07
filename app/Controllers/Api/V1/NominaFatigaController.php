@@ -1836,7 +1836,30 @@ class NominaFatigaController extends ResourceController
 
         try {
             $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($tmpPath);
-            $reader->setLoadSheetsOnly(['Altas', 'Bajas', 'Asistencia']);
+
+            // setLoadSheetsOnly exige coincidencia EXACTA (mayúsculas/espacios).
+            // Primero detectamos los nombres reales de hoja sin importar mayúsculas,
+            // igual que ya hace buscarHojaPorNombre() en el resto del código.
+            $nombresReales = $reader->listWorksheetNames($tmpPath);
+            $buscadas      = ['altas', 'bajas', 'asistencia'];
+            $hojasAEncontrar = [];
+
+            foreach ($nombresReales as $nombreReal) {
+                if (in_array(strtolower(trim($nombreReal)), $buscadas, true)) {
+                    $hojasAEncontrar[] = $nombreReal; // el nombre EXACTO tal cual está en el archivo
+                }
+            }
+
+            if (empty($hojasAEncontrar)) {
+                @unlink($tmpPath);
+                return $this->respond([
+                    'status'  => 'error',
+                    'message' => 'El archivo no contiene ninguna hoja llamada Altas, Bajas o Asistencia. '
+                            . 'Hojas encontradas: ' . implode(', ', $nombresReales),
+                ], 422);
+            }
+
+            $reader->setLoadSheetsOnly($hojasAEncontrar);
             $reader->setReadDataOnly(true);
             $spreadsheet = $reader->load($tmpPath);
         } catch (\Throwable $e) {
