@@ -372,11 +372,20 @@ class NominaFatigaController extends ResourceController
        LISTADO / DETALLE
     ═══════════════════════════════════════════════════════ */
 
-    /** GET /api/v1/nomina */
+    /** GET /api/v1/nomina-fatiga */
     public function index(): mixed
     {
         $model = new NominaFatigaModel();
         $rows = $model->where('is_deleted', 0)->orderBy('created_at', 'DESC')->findAll();
+
+        $db = \Config\Database::connect();
+        foreach ($rows as &$r) {
+            $r['cargas'] = $db->table('nomina_fatiga_cargas')
+                ->where('id_nomina', $r['id'])
+                ->orderBy('created_at', 'ASC')
+                ->get()->getResultArray();
+        }
+
         return $this->respond(['status' => 'ok', 'data' => $rows]);
     }
 
@@ -1289,12 +1298,12 @@ class NominaFatigaController extends ResourceController
      */
     public function iniciarAsistencia(): mixed
     {
-        // Archivos grandes (1,000+ filas) necesitan más tiempo de ejecución
         @set_time_limit(600);
         @ini_set('memory_limit', '512M');
 
         $actor = $this->request->jwtUser;
 
+        $idNominaExistente = (int)($this->request->getVar('id_nomina') ?? 0); // NUEVO: lote existente
         $nombre        = trim($this->request->getVar('nombre') ?? 'Nómina ' . date('Y-m-d H:i'));
         $periodoInicio = $this->request->getVar('periodo_inicio') ?: null;
         $periodoFin    = $this->request->getVar('periodo_fin') ?: null;
@@ -1327,591 +1336,82 @@ class NominaFatigaController extends ResourceController
         $db = \Config\Database::connect();
         $nominaModel = new \App\Models\NominaFatigaModel();
 
-        $idNomina = $nominaModel->insert([
-            'nombre'            => $nombre,
-            'periodo_inicio'    => $periodoInicio,
-            'periodo_fin'       => $periodoFin,
-            'archivo_original'  => $nombreArchivoOriginal,
-            'total_empleados'   => count($filas),
-            'filas_procesadas'  => 0,
-            'estatus'           => 'procesando',
-            'created_by'        => (int)$actor->id,
-            'created_at'        => date('Y-m-d H:i:s'),
-        ], true);
+        // ── Detectar zona/cliente/empresa mayoritarios del archivo, vía id_servicio ──
+        $idsServicioRaw = array_unique(array_filter(array_map(fn($f) => (int)($f['id_servicio'] ?? 0), $filas)));
 
-        // Inserta TODAS las filas de golpe con datos crudos — esto sí es rápido
-        // (un insertBatch por cada 500, sin queries de match ni cálculo todavía)
-        $batch = [];
-        foreach ($filas as $fila) {
-            $batch[] = [
-                'id_nomina'         => $idNomina,
-                'id_empleado'       => null, // se llena al calcular
-                'curp_excel'        => '',
-                'nombre_excel'      => $fila['nombre'] ?? '',
-                'zona'              => null,
-                'servicio'          => $fila['servicio'] ?? null,
-                'turno'             => null,
-                'puesto'            => null,
-                'calendario_json'   => json_encode($fila['dias'] ?? []),
-                'sueldo_semanal'    => 0,
-                'tiempo_extra'      => 0,
-                'adicional'         => (float)($fila['adicional'] ?? 0),
-                'descuento_faltas'  => 0,
-                'otros_descuentos'  => (float)($fila['otros_descuentos'] ?? 0),
-                'total'             => 0,
-                'pendiente_calculo' => 1,
-                'id_empleado_raw'   => (int)($fila['id_empleado'] ?? 0),
-                'id_servicio_raw'   => (int)($fila['id_servicio'] ?? 0),
-                'comentarios'       => $fila['comentarios'] ?? null,
+        $nombreCarga = 'Sin zona detectada';
+        $idZonaCarga = null;
+        $clienteCarga = null;
+        $empresaCarga = null;
+
+        if ($idsServicioRaw) {
+            $rows = $db->query("
+                SELECT z.id AS id_zona, z.zona AS zona_nombre,
+                    c.id AS id_cliente, e.id AS id_empresa,
+                    COUNT(*) AS cuenta
+                FROM servicios s
+                JOIN zonas z     ON s.id_zona = z.id
+                JOIN clientes c  ON s.id_cliente = c.id
+                JOIN empresas e  ON s.id_empresa = e.id
+                WHERE s.id IN (" . implode(',', $idsServicioRaw) . ")
+                GROUP BY z.id, z.zona, c.id, e.id
+                ORDER BY cuenta DESC
+                LIMIT 1
+            ")->getRowArray();
+
+            if ($rows) {
+                $nombreCarga = $rows['zona_nombre'] ?? 'Sin zona detectada';
+                $idZonaCarga = $rows['id_zona'] ?? null;
+                $idClienteCarga = $rows['id_cliente'] ?? null;   // antes: $clienteCarga (nombre)
+                $idEmpresaCarga = $rows['id_empresa'] ?? null;   // antes: $empresaCarga (nombre)
+            }
+        }
+
+        // ── Lote: usar uno existente (id_nomina) o crear uno nuevo ────────
+        if ($idNominaExistente > 0) {
+            $loteExistente = $nominaModel->find($idNominaExistente);
+            if (!$loteExistente) {
+                return $this->respond(['status' => 'error', 'message' => 'El lote indicado no existe'], 404);
+            }
+            if (!in_array($loteExistente['estatus'], ['borrador', 'procesando'])) {
+                return $this->respond(['status' => 'error', 'message' => 'Ese lote ya fue aprobado/dispersado, no se pueden agregar más cargas'], 422);
+            }
+            $idNomina = $idNominaExistente;
+            $nominaModel->update($idNomina, ['estatus' => 'procesando']);
+        } else {
+            $idNomina = $nominaModel->insert([
+                'nombre'            => $nombre,
+                'periodo_inicio'    => $periodoInicio,
+                'periodo_fin'       => $periodoFin,
+                'archivo_original'  => $nombreArchivoOriginal,
+                'total_empleados'   => 0,
+                'filas_procesadas'  => 0,
+                'estatus'           => 'procesando',
+                'created_by'        => (int)$actor->id,
                 'created_at'        => date('Y-m-d H:i:s'),
-            ];
-
-            if (count($batch) >= 500) {
-                $db->table('nomina_fatiga_detalle')->insertBatch($batch);
-                $batch = [];
-            }
-        }
-        if ($batch) {
-            $db->table('nomina_fatiga_detalle')->insertBatch($batch);
+            ], true);
         }
 
-        return $this->respond([
-            'status' => 'ok',
-            'data'   => [
-                'id_nomina'  => $idNomina,
-                'total'      => count($filas),
-                'chunk_size' => self::CHUNK_SIZE_DEFAULT,
-            ],
-        ], 201);
-    }
-
-    /**
-     * POST /api/v1/nomina-fatiga/{id}/procesar-chunk
-     * Body: { offset, limit } — opcional, por defecto limit=100
-     *
-     * Toma un pedazo de filas pendientes de esta nómina, las calcula
-     * (bulk-fetch de empleados/servicios/tabuladores) y las actualiza.
-     * El frontend llama esto en loop hasta que "pendientes" llegue a 0.
-     */
-    public function procesarChunk($id = null): mixed
-    {
-    $idNomina = (int)$id;
-    $limit    = (int)($this->request->getVar('limit') ?? self::CHUNK_SIZE_DEFAULT);
-    if ($limit <= 0 || $limit > 500) $limit = self::CHUNK_SIZE_DEFAULT;
-
-    $db = \Config\Database::connect();
-
-    $pendientes = $db->table('nomina_fatiga_detalle')
-        ->where('id_nomina', $idNomina)
-        ->where('pendiente_calculo', 1)
-        ->orderBy('id', 'ASC')
-        ->limit($limit)
-        ->get()->getResultArray();
-
-    if (!$pendientes) {
-        return $this->finalizarNomina($idNomina);
-    }
-
-    // ── 1. Bulk-fetch empleados ──────────────────────────────────────
-    $idsEmpleado = array_unique(array_filter(array_column($pendientes, 'id_empleado_raw')));
-    $empleadosPorId = [];
-    if ($idsEmpleado) {
-        $rows = $db->query("
-            SELECT e.id, e.id_puesto, e.id_turno, mp.valor AS puesto
-            FROM empleados e
-            LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
-            WHERE e.id IN (" . implode(',', $idsEmpleado) . ")
-        ")->getResultArray();
-        foreach ($rows as $r) $empleadosPorId[(int)$r['id']] = $r;
-    }
-
-    // ── 2. Bulk-fetch servicios ──────────────────────────────────────
-    $idsServicio = array_unique(array_filter(array_column($pendientes, 'id_servicio_raw')));
-    $serviciosPorId = [];
-    if ($idsServicio) {
-        $rows = $db->query("
-            SELECT s.id, s.servicio, s.id_zona
-            FROM servicios s
-            WHERE s.id IN (" . implode(',', $idsServicio) . ")
-        ")->getResultArray();
-        foreach ($rows as $r) $serviciosPorId[(int)$r['id']] = $r;
-    }
-
-    // ── 3. Bulk-fetch tabuladores ────────────────────────────────────
-    $paresUnicos = [];
-    foreach ($pendientes as $det) {
-        $emp  = $empleadosPorId[(int)$det['id_empleado_raw']] ?? null;
-        $serv = $serviciosPorId[(int)$det['id_servicio_raw']] ?? null;
-        if ($emp && $serv) {
-            $key = $emp['id_puesto'] . '_' . $serv['id_zona'];
-            $paresUnicos[$key] = ['id_puesto' => $emp['id_puesto'], 'id_zona' => $serv['id_zona']];
-        }
-    }
-
-    $tabuladorPorPar = [];
-    if ($paresUnicos) {
-        $idsZona = array_unique(array_column($paresUnicos, 'id_zona'));
-        $rows = $db->query("
-            SELECT tsd.id_puesto, ts.id_zona, tsd.sueldo, tsd.bono, tsd.descuento
-            FROM tabulador_salarios_detalle tsd
-            JOIN tabulador_salarios ts ON tsd.id_tabulador = ts.id
-            WHERE ts.id_zona IN (" . implode(',', $idsZona) . ")
-                AND ts.estatus = 1 AND tsd.estatus = 1
-            ORDER BY ts.id DESC
-        ")->getResultArray();
-        foreach ($rows as $r) {
-            $key = $r['id_puesto'] . '_' . $r['id_zona'];
-            if (!isset($tabuladorPorPar[$key])) $tabuladorPorPar[$key] = $r;
-        }
-    }
-
-    // ── 4. Bulk-fetch deducciones (FONACOT + INFONAVIT + pensión) ───
-    $deduccionesPorEmpleado = [];
-    if ($idsEmpleado) {
-        $rows = $db->query("
-            SELECT id_empleado, tipo, SUM(monto_quincenal) AS total_quincenal
-            FROM deducciones_empleado
-            WHERE id_empleado IN (" . implode(',', $idsEmpleado) . ")
-                AND estatus = 1
-            GROUP BY id_empleado, tipo
-        ")->getResultArray();
-        foreach ($rows as $r) {
-            $deduccionesPorEmpleado[(int)$r['id_empleado']][$r['tipo']] = (float)$r['total_quincenal'];
-        }
-    }
-
-    // ── 5. Calcular, actualizar nómina e insertar asistencias ────────
-    $sinMatch     = 0;
-    $sinTabulador = 0;
-    $batchAsist   = [];
-
-    $horasPorCodigo = [
-        '24'  => ['entrada' => '07:00:00', 'salida' => '07:00:00'],
-        '24E' => ['entrada' => '07:00:00', 'salida' => '07:00:00'],
-        '12'  => ['entrada' => '07:00:00', 'salida' => '19:00:00'],
-        '12E' => ['entrada' => '07:00:00', 'salida' => '19:00:00'],
-    ];
-    $codigosIncidencia = ['I', 'PCS', 'PSS'];
-    $codigosOmitir    = ['D', 'A', 'B', 'V']; // no generan asistencia
-
-    $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
-    $periodoInicio = $nomina['periodo_inicio'] ?? date('Y-m-d');
-
-    foreach ($pendientes as $det) {
-        $idEmpRaw = (int)$det['id_empleado_raw'];
-        $empleado = $empleadosPorId[$idEmpRaw] ?? null;
-        $servicio = $serviciosPorId[(int)$det['id_servicio_raw']] ?? null;
-
-        if (!$empleado) $sinMatch++;
-
-        $calculo = ['sueldo_semanal' => 0, 'bono' => 0, 'tiempo_extra' => 0,
-                    'descuento_faltas' => 0, 'conteo_faltas' => 0,
-                    'conteo_pss' => 0, 'conteo_12e' => 0, 'conteo_24e' => 0,
-                    'conteo_incapacidad' => 0, 'conteo_vacaciones' => 0,
-                    'dias_pagados' => 0];
-        $diasArr = json_decode($det['calendario_json'] ?? '[]', true) ?: [];
-        $tabulador = null;
-
-        if ($empleado && $servicio) {
-            $key = $empleado['id_puesto'] . '_' . $servicio['id_zona'];
-            $tabulador = $tabuladorPorPar[$key] ?? null;
-            if ($tabulador) {
-                $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador);
-            } else {
-                $sinTabulador++;
-            }
-        }
-
-        // ── Deducciones ─────────────────────────────────────────────
-        $deducciones   = $deduccionesPorEmpleado[$idEmpRaw] ?? [];
-        $descFonacot   = $deducciones['fonacot']   ?? 0;
-        $descInfonavit = $deducciones['infonavit']  ?? 0;
-        $descPension   = $deducciones['pension']    ?? 0;
-
-        // ── Festivos en el periodo ───────────────────────────────────
-        $diasFestivos = \App\Libraries\FestivosLibrary::diasFestivosEnCalendario(
-            $diasArr, $nomina['periodo_inicio'] ?? date('Y-m-d')
-        );
-        $conteoFestivos = count($diasFestivos);
-        $salarioDiario  = $calculo['sueldo_semanal'] > 0
-            ? round($calculo['sueldo_semanal'] / 7, 4)
-            : 0;
-        $montoFestivos  = $conteoFestivos * $salarioDiario;
-
-        // ── Dobletes ─────────────────────────────────────────────────
-        $turnoEmp = $empleado ? ($empleado['id_turno'] ?? '24') : '24';
-        $turnoStr = (str_contains((string)$turnoEmp, '12')) ? '12' : '24';
-        $dobletes = \App\Libraries\FestivosLibrary::detectarDobletes(
-            $diasArr, $turnoStr, $salarioDiario
-        );
-
-        // ── ¿Es empleado nuevo en este periodo? ──────────────────────
-        $esNuevo = in_array('A', array_map('strtoupper', array_values($diasArr)));
-
-        $adicional       = (float)$det['adicional'];
-        $otrosDescuentos = (float)$det['otros_descuentos'];
-
-        // ── Sueldo tabulador base (una sola vez) ──────────────────────
-        $sueldoTabuladorBase = (float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750);
-
-        // ── Incapacidad (código 'I') ───────────────────────────────────
-        $diasIncapacidad = $calculo['conteo_incapacidad'] ?? 0;
-        $incap = \App\Libraries\NominaFiscalLibrary::calcularIncapacidad($sueldoTabuladorBase, $diasIncapacidad);
-
-        $descuentoIncapacidad = 0;
-        if ($diasIncapacidad > 0) {
-            $baseParaDescuento = $calculo['sueldo_semanal'] + $calculo['bono'] + $calculo['tiempo_extra'];
-            $descuentoIncapacidad = round(($baseParaDescuento / 15) * $diasIncapacidad, 2);
-        }
-
-        // ── Vacaciones (código 'V') ──────────────────────────────────
-        $conteoVacaciones = $calculo['conteo_vacaciones'] ?? 0;
-        $primaVacacional = \App\Libraries\NominaFiscalLibrary::calcularPrimaVacacional($sueldoTabuladorBase, $conteoVacaciones);
-
-        // ── Total final ──────────────────────────────────────────────
-        $totalFinal = max(0, round(
-            $calculo['sueldo_semanal']
-            + $calculo['bono']
-            + $calculo['tiempo_extra']
-            + $montoFestivos
-            + $dobletes['monto_extra']
-            + $primaVacacional
-            + $adicional
-            - $calculo['descuento_faltas']
-            - $descuentoIncapacidad
-            + $incap['incapacidad_empresa']
-            - $otrosDescuentos
-            - $descFonacot - $descInfonavit - $descPension, 2
-        ));
-
-        // ── Cálculo fiscal (ISR, IMSS, Subsidio, IAS) ────────────────
-        // El bloque fiscal SIEMPRE usa el sueldo fiscal FIJO ($4,750),
-        // nunca el sueldo tabulador real — la diferencia la absorbe la IAS.
-        $diasPagados   = (int)($calculo['dias_pagados'] ?? 15);
-        $tieneAltaBaja = ($calculo['conteo_alta'] ?? 0) > 0
-                    || ($calculo['conteo_baja'] ?? 0) > 0
-                    || ($calculo['es_baja'] ?? false);
-
-        // Días fiscales = 15 - F - PSS - A - B (fórmula validada del maestro)
-        $diasFiscales = max(0, 15
-            - ($calculo['conteo_faltas'] ?? 0)
-            - ($calculo['conteo_pss']    ?? 0)
-            - ($calculo['conteo_alta']   ?? 0)
-            - ($calculo['conteo_baja']   ?? 0)
-        );
-
-        // FIX: si el pago real ya se topó en 0 (+3 faltas que superan lo
-        // trabajado, o baja real sin días trabajados), el fiscal TAMBIÉN
-        // debe ser 0 completo — no solo el pago, todo el bloque fiscal.
-        if ($tieneAltaBaja && ($calculo['sueldo_semanal'] ?? 0) <= 0) {
-            $diasFiscales = 0;
-        }
-
-        $sdFijo = (\App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO - 4.0) / 15; // 316.40
-
-        $sueldoNetoPagarFiscal = $tieneAltaBaja
-            ? round($sdFijo * $diasFiscales, 2)
-            : $totalFinal;
-
-        $fiscal = \App\Libraries\NominaFiscalLibrary::calcular(
-            \App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO,
-            $sueldoNetoPagarFiscal,
-            $diasFiscales,
-            $descInfonavit,
-            $descFonacot,
-            $descPension
-        );
-
-        // ── Actualizar detalle de nómina con todos los campos ────────
-        // ── Actualizar detalle de nómina con todos los campos ────────
-        $db->table('nomina_fatiga_detalle')->where('id', $det['id'])->update([
-            'id_empleado'           => $empleado['id'] ?? null,
-            'zona'                  => $servicio['servicio'] ?? ($det['servicio'] ?? null),
-            'puesto'                => $empleado['puesto'] ?? null,
-            'conteo_faltas'         => $calculo['conteo_faltas'] ?? 0,
-            'conteo_pss'            => $calculo['conteo_pss'] ?? 0,
-            'conteo_12h_extra'      => $calculo['conteo_12e'] ?? 0,
-            'conteo_24h_extra'      => $calculo['conteo_24e'] ?? 0,
-            'conteo_festivos'       => $conteoFestivos,
-            'conteo_dobletes'       => $dobletes['count'],
-            'monto_festivos'        => round($montoFestivos, 2),
-            'monto_dobletes'        => $dobletes['monto_extra'],
-            'es_nuevo'              => $esNuevo ? 1 : 0,
-            'dias_pagados'          => $diasPagados,
-            'sueldo_semanal'        => $calculo['sueldo_semanal'],
-            'tiempo_extra'          => $calculo['tiempo_extra'],
-            'descuento_faltas'      => $calculo['descuento_faltas'],
-            'otros_descuentos'      => $otrosDescuentos,
-            'desc_fonacot'          => $descFonacot,
-            'desc_infonavit'        => $descInfonavit,
-            'desc_pension'          => $descPension,
-            'conteo_incapacidad'    => $diasIncapacidad,
-            'descuento_incapacidad' => $descuentoIncapacidad,
-            'incapacidad_100'       => $incap['incapacidad_100'],
-            'incapacidad_imss'      => $incap['incapacidad_imss'],
-            'incapacidad_empresa'   => $incap['incapacidad_empresa'],
-            'conteo_vacaciones'     => $conteoVacaciones,
-            'prima_vacacional'      => $primaVacacional,
-            'total'                 => $totalFinal,
-            // Campos fiscales
-            'sd'                    => $fiscal['sd'],
-            'sdi'                   => $fiscal['sdi'],
-            'ingreso_quincenal'     => $fiscal['ingreso_quincenal'],
-            'imss_obrero'           => $fiscal['imss_obrero'],
-            'isr_bruto'             => $fiscal['isr_bruto'],
-            'subsidio_empleo'       => $fiscal['subsidio_empleo'],
-            'isr_neto'              => $fiscal['isr_neto'],
-            'neto_fiscal'           => $fiscal['neto_fiscal'],   
-            'ias'                   => $fiscal['ias'],           
-            'total_dispersion'      => $fiscal['total_dispersion'], 
-            'pendiente_calculo'     => 0,
-        ]);
-
-        // ── Generar registros de asistencias_fatiga ──────────────────
-        if ($empleado && !empty($diasArr)) {
-            $idEmp  = (int)$empleado['id'];
-            $idUbic = (int)$det['id_servicio_raw'];
-
-            foreach ($diasArr as $numDia => $codigo) {
-                $codigo = strtoupper(trim($codigo));
-
-                $fecha = date('Y-m-d', strtotime($periodoInicio . ' +' . ((int)$numDia - (int)date('j', strtotime($periodoInicio))) . ' days'));
-
-                if (in_array($codigo, $codigosOmitir)) continue;
-
-                if (isset($horasPorCodigo[$codigo])) {
-                    $batchAsist[] = [
-                        'id_nomina_fatiga' => $idNomina,
-                        'id_empleado'      => $idEmp,
-                        'id_ubicacion'     => $idUbic,
-                        'fecha'            => $fecha,
-                        'hora'             => $horasPorCodigo[$codigo]['entrada'],
-                        'id_status'        => 1,
-                        'codigo_dia'       => $codigo,
-                        'estado'           => 'asistencia',
-                    ];
-                    $batchAsist[] = [
-                        'id_nomina_fatiga' => $idNomina,
-                        'id_empleado'      => $idEmp,
-                        'id_ubicacion'     => $idUbic,
-                        'fecha'            => $fecha,
-                        'hora'             => $horasPorCodigo[$codigo]['salida'],
-                        'id_status'        => 2,
-                        'codigo_dia'       => $codigo,
-                        'estado'           => 'asistencia',
-                    ];
-                } elseif ($codigo === 'F') {
-                    $batchAsist[] = [
-                        'id_nomina_fatiga' => $idNomina,
-                        'id_empleado'      => $idEmp,
-                        'id_ubicacion'     => $idUbic,
-                        'fecha'            => $fecha,
-                        'hora'             => '07:00:00',
-                        'id_status'        => 1,
-                        'codigo_dia'       => 'F',
-                        'estado'           => 'falta',
-                    ];
-                } elseif (in_array($codigo, $codigosIncidencia)) {
-                    $batchAsist[] = [
-                        'id_nomina_fatiga' => $idNomina,
-                        'id_empleado'      => $idEmp,
-                        'id_ubicacion'     => $idUbic,
-                        'fecha'            => $fecha,
-                        'hora'             => '07:00:00',
-                        'id_status'        => 1,
-                        'codigo_dia'       => $codigo,
-                        'estado'           => 'incidencia',
-                    ];
-                }
-            }
-        }
-    }
-
-    // Guardar asistencias en batch — INSERT IGNORE para evitar duplicados
-    if ($batchAsist) {
-        foreach (array_chunk($batchAsist, 200) as $chunk) {
-            $db->table('asistencias_fatiga')->insertBatch($chunk);
-        }
-    }
-
-    $procesadasEnChunk = count($pendientes);
-
-    $db->query("
-        UPDATE nomina_fatiga SET filas_procesadas = filas_procesadas + ? WHERE id = ?
-    ", [$procesadasEnChunk, $idNomina]);
-
-    $restantes = $db->table('nomina_fatiga_detalle')
-        ->where('id_nomina', $idNomina)
-        ->where('pendiente_calculo', 1)
-        ->countAllResults();
-
-    if ($restantes === 0) {
-        return $this->finalizarNomina($idNomina);
-    }
-
-    $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
-
-    return $this->respond([
-        'status' => 'ok',
-        'data'   => [
-            'id_nomina'           => $idNomina,
-            'procesadas_chunk'    => $procesadasEnChunk,
-            'filas_procesadas'    => (int)($nomina['filas_procesadas'] ?? 0),
-            'total'               => (int)($nomina['total_empleados'] ?? 0),
-            'restantes'           => $restantes,
-            'completo'            => false,
-            'sin_match_chunk'     => $sinMatch,
-            'sin_tabulador_chunk' => $sinTabulador,
-        ],
-    ]);
-    }
-
-    /** Cierra la nómina cuando ya no quedan filas pendientes — calcula el total_pagar final */
-    private function finalizarNomina(int $idNomina): mixed
-    {
-        $db = \Config\Database::connect();
-
-        $totalPagar = $db->table('nomina_fatiga_detalle')
-            ->selectSum('total')
-            ->where('id_nomina', $idNomina)
-            ->get()->getRow()->total ?? 0;
-
-        $sinMatch = $db->table('nomina_fatiga_detalle')
-            ->where('id_nomina', $idNomina)
-            ->where('id_empleado', null)
-            ->countAllResults();
-
-        $nominaModel = new \App\Models\NominaFatigaModel();
-        $nominaModel->update($idNomina, [
-            'estatus'     => 'borrador',
-            'total_pagar' => $totalPagar,
-        ]);
-
-        $actor = $this->request->jwtUser;
-        if ($actor) {
-            \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_NOMINA_FATIGA', 'nomina_fatiga', (string)$idNomina,
-                "Nómina procesada por chunks completa — total: {$totalPagar}, {$sinMatch} sin match");
-        }
-
-        return $this->respond([
-            'status' => 'ok',
-            'data'   => [
-                'id_nomina'  => $idNomina,
-                'completo'   => true,
-                'restantes'  => 0,
-                'total_pagar' => round((float)$totalPagar, 2),
-                'sin_match'  => $sinMatch,
-            ],
-        ]);
-    }
-
-
-
-    /* ═══════════════════════════════════════════════════════════════
-       POST /api/v1/nomina-fatiga/procesar-xlsm
-       Procesa el xlsm completo en orden:
-         1) Hoja "Altas"      → INSERT IGNORE en empleados
-         2) Hoja "Bajas"      → UPDATE estatus=0 en empleados
-         3) Hoja "Asistencia" → iniciarAsistencia() (chunks)
-       Body: archivo=xlsm, nombre, periodo_inicio, periodo_fin
-    ═══════════════════════════════════════════════════════════════ */
-    public function procesarXlsm(): mixed
-    {
-        @set_time_limit(600);
-        @ini_set('memory_limit', '512M');
-
-        $actor = $this->request->jwtUser;
-
-        $archivo = $this->request->getFile('archivo');
-        if (!$archivo || !$archivo->isValid()) {
-            return $this->respond(['status' => 'error', 'message' => 'Debes subir un archivo .xlsm válido'], 400);
-        }
-
-        $nombre        = trim($this->request->getVar('nombre') ?? 'Nómina ' . date('Y-m-d H:i'));
-        $periodoInicio = $this->request->getVar('periodo_inicio') ?: null;
-        $periodoFin    = $this->request->getVar('periodo_fin') ?: null;
-
-        $tmpPath = WRITEPATH . 'uploads/' . $archivo->getRandomName();
-        $archivo->move(WRITEPATH . 'uploads', basename($tmpPath));
-
-        try {
-            $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($tmpPath);
-
-            // setLoadSheetsOnly exige coincidencia EXACTA (mayúsculas/espacios).
-            // Primero detectamos los nombres reales de hoja sin importar mayúsculas,
-            // igual que ya hace buscarHojaPorNombre() en el resto del código.
-            $nombresReales = $reader->listWorksheetNames($tmpPath);
-            $buscadas      = ['altas', 'bajas', 'asistencia'];
-            $hojasAEncontrar = [];
-
-            foreach ($nombresReales as $nombreReal) {
-                if (in_array(strtolower(trim($nombreReal)), $buscadas, true)) {
-                    $hojasAEncontrar[] = $nombreReal; // el nombre EXACTO tal cual está en el archivo
-                }
-            }
-
-            if (empty($hojasAEncontrar)) {
-                @unlink($tmpPath);
-                return $this->respond([
-                    'status'  => 'error',
-                    'message' => 'El archivo no contiene ninguna hoja llamada Altas, Bajas o Asistencia. '
-                            . 'Hojas encontradas: ' . implode(', ', $nombresReales),
-                ], 422);
-            }
-
-            $reader->setLoadSheetsOnly($hojasAEncontrar);
-            $reader->setReadDataOnly(true);
-            $spreadsheet = $reader->load($tmpPath);
-        } catch (\Throwable $e) {
-            @unlink($tmpPath);
-            return $this->respond(['status' => 'error', 'message' => 'Error leyendo el archivo: ' . $e->getMessage()], 422);
-        }
-
-        $resultadoAltas = $this->procesarHojaAltas($spreadsheet, $actor);
-        $resultadoBajas = $this->procesarHojaBajas($spreadsheet, $actor);
-
-        // Leer hoja Asistencia para el chunk processing
-        try {
-            $filasAsistencia = $this->extraerFilasAsistenciaDesdeSpreadsheet($spreadsheet);
-        } catch (\Throwable $e) {
-            @unlink($tmpPath);
-            return $this->respond(['status' => 'error', 'message' => 'Error leyendo Asistencia: ' . $e->getMessage()], 422);
-        }
-
-        @unlink($tmpPath);
-
-        if (empty($filasAsistencia)) {
-            return $this->respond([
-                'status' => 'ok',
-                'message' => 'Altas y bajas procesadas. Sin filas de asistencia.',
-                'data' => [
-                    'altas'       => $resultadoAltas,
-                    'bajas'       => $resultadoBajas,
-                    'asistencia'  => null,
-                ],
-            ]);
-        }
-
-        // Insertar todas las filas crudas de asistencia para procesar por chunks
-        $db = \Config\Database::connect();
-        $nominaModel = new \App\Models\NominaFatigaModel();
-
-        $idNomina = $nominaModel->insert([
-            'nombre'           => $nombre,
-            'periodo_inicio'   => $periodoInicio,
-            'periodo_fin'      => $periodoFin,
-            'archivo_original' => $archivo->getClientName(),
-            'total_empleados'  => count($filasAsistencia),
-            'filas_procesadas' => 0,
+        // ── Crear la carga (el "cachito" que se está subiendo ahora) ──────
+        $idCarga = $db->table('nomina_fatiga_cargas')->insert([
+            'id_nomina'        => $idNomina,
+            'nombre_carga'     => $nombreCarga,
+            'id_zona'          => $idZonaCarga,
+            'id_cliente'       => $idClienteCarga,
+            'id_empresa'       => $idEmpresaCarga,
+            'archivo_original' => $nombreArchivoOriginal,
+            'total_empleados'  => count($filas),
             'estatus'          => 'procesando',
             'created_by'       => (int)$actor->id,
             'created_at'       => date('Y-m-d H:i:s'),
         ], true);
 
+        // ── Insertar las filas crudas, etiquetadas con id_carga ────────────
         $batch = [];
-        foreach ($filasAsistencia as $fila) {
+        foreach ($filas as $fila) {
             $batch[] = [
                 'id_nomina'         => $idNomina,
+                'id_carga'          => $idCarga, // NUEVO
                 'id_empleado'       => null,
                 'curp_excel'        => '',
                 'nombre_excel'      => $fila['nombre'] ?? '',
@@ -1942,19 +1442,677 @@ class NominaFatigaController extends ResourceController
             $db->table('nomina_fatiga_detalle')->insertBatch($batch);
         }
 
+        // Sumar (no sobrescribir) el total del lote
+        $db->query("UPDATE nomina_fatiga SET total_empleados = total_empleados + ? WHERE id = ?", [count($filas), $idNomina]);
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => [
+                'id_nomina'    => $idNomina,
+                'id_carga'     => $idCarga,
+                'nombre_carga' => $nombreCarga, // para que el frontend confirme qué zona detectó
+                'total'        => count($filas),
+                'chunk_size'   => self::CHUNK_SIZE_DEFAULT,
+            ],
+        ], 201);
+    }
+
+    /** GET /api/v1/nomina-fatiga/lotes-abiertos */
+    public function lotesAbiertos(): mixed
+    {
+        $model = new \App\Models\NominaFatigaModel();
+        $lotes = $model->whereIn('estatus', ['borrador', 'procesando'])
+            ->orderBy('created_at', 'DESC')
+            ->findAll();
+
+        $db = \Config\Database::connect();
+        foreach ($lotes as &$lote) {
+            $lote['cargas'] = $db->query("
+                SELECT nfc.*, z.zona AS zona_nombre, c.nombre_corto AS cliente_nombre, e.empresa AS empresa_nombre
+                FROM nomina_fatiga_cargas nfc
+                LEFT JOIN zonas z    ON z.id = nfc.id_zona
+                LEFT JOIN clientes c ON c.id = nfc.id_cliente
+                LEFT JOIN empresas e ON e.id = nfc.id_empresa
+                WHERE nfc.id_nomina = ?
+                ORDER BY nfc.created_at ASC
+            ", [$lote['id']])->getResultArray();
+        }
+
+        return $this->respond(['status' => 'ok', 'data' => $lotes]);
+    }
+
+    /**
+     * POST /api/v1/nomina-fatiga/{id}/procesar-chunk
+     * Body: { offset, limit } — opcional, por defecto limit=100
+     *
+     * Toma un pedazo de filas pendientes de esta nómina, las calcula
+     * (bulk-fetch de empleados/servicios/tabuladores) y las actualiza.
+     * El frontend llama esto en loop hasta que "pendientes" llegue a 0.
+     */
+    public function procesarChunk($id = null): mixed
+    {
+        $idNomina = (int)$id;
+        $limit    = (int)($this->request->getVar('limit') ?? self::CHUNK_SIZE_DEFAULT);
+        if ($limit <= 0 || $limit > 500) $limit = self::CHUNK_SIZE_DEFAULT;
+
+        $db = \Config\Database::connect();
+
+        $pendientes = $db->table('nomina_fatiga_detalle')
+            ->where('id_nomina', $idNomina)
+            ->where('pendiente_calculo', 1)
+            ->orderBy('id', 'ASC')
+            ->limit($limit)
+            ->get()->getResultArray();
+
+        if (!$pendientes) {
+            return $this->finalizarNomina($idNomina);
+        }
+
+        // ── 1. Bulk-fetch empleados ──────────────────────────────────────
+        $idsEmpleado = array_unique(array_filter(array_column($pendientes, 'id_empleado_raw')));
+        $empleadosPorId = [];
+        if ($idsEmpleado) {
+            $rows = $db->query("
+                SELECT e.id, e.id_puesto, e.id_turno, mp.valor AS puesto
+                FROM empleados e
+                LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+                WHERE e.id IN (" . implode(',', $idsEmpleado) . ")
+            ")->getResultArray();
+            foreach ($rows as $r) $empleadosPorId[(int)$r['id']] = $r;
+        }
+
+        // ── 2. Bulk-fetch servicios ──────────────────────────────────────
+        $idsServicio = array_unique(array_filter(array_column($pendientes, 'id_servicio_raw')));
+        $serviciosPorId = [];
+        if ($idsServicio) {
+            $rows = $db->query("
+                SELECT s.id, s.servicio, s.id_zona
+                FROM servicios s
+                WHERE s.id IN (" . implode(',', $idsServicio) . ")
+            ")->getResultArray();
+            foreach ($rows as $r) $serviciosPorId[(int)$r['id']] = $r;
+        }
+
+        // ── 3. Bulk-fetch tabuladores ────────────────────────────────────
+        $paresUnicos = [];
+        foreach ($pendientes as $det) {
+            $emp  = $empleadosPorId[(int)$det['id_empleado_raw']] ?? null;
+            $serv = $serviciosPorId[(int)$det['id_servicio_raw']] ?? null;
+            if ($emp && $serv) {
+                $key = $emp['id_puesto'] . '_' . $serv['id_zona'];
+                $paresUnicos[$key] = ['id_puesto' => $emp['id_puesto'], 'id_zona' => $serv['id_zona']];
+            }
+        }
+
+        $tabuladorPorPar = [];
+        if ($paresUnicos) {
+            $idsZona = array_unique(array_column($paresUnicos, 'id_zona'));
+            $rows = $db->query("
+                SELECT tsd.id_puesto, ts.id_zona, tsd.sueldo, tsd.bono, tsd.descuento
+                FROM tabulador_salarios_detalle tsd
+                JOIN tabulador_salarios ts ON tsd.id_tabulador = ts.id
+                WHERE ts.id_zona IN (" . implode(',', $idsZona) . ")
+                    AND ts.estatus = 1 AND tsd.estatus = 1
+                ORDER BY ts.id DESC
+            ")->getResultArray();
+            foreach ($rows as $r) {
+                $key = $r['id_puesto'] . '_' . $r['id_zona'];
+                if (!isset($tabuladorPorPar[$key])) $tabuladorPorPar[$key] = $r;
+            }
+        }
+
+        // ── 4. Bulk-fetch deducciones (FONACOT + INFONAVIT + pensión) ───
+        $deduccionesPorEmpleado = [];
+        if ($idsEmpleado) {
+            $rows = $db->query("
+                SELECT id_empleado, tipo, SUM(monto_quincenal) AS total_quincenal
+                FROM deducciones_empleado
+                WHERE id_empleado IN (" . implode(',', $idsEmpleado) . ")
+                    AND estatus = 1
+                GROUP BY id_empleado, tipo
+            ")->getResultArray();
+            foreach ($rows as $r) {
+                $deduccionesPorEmpleado[(int)$r['id_empleado']][$r['tipo']] = (float)$r['total_quincenal'];
+            }
+        }
+
+        // ── 5. Calcular, actualizar nómina e insertar asistencias ────────
+        $sinMatch     = 0;
+        $sinTabulador = 0;
+        $batchAsist   = [];
+
+        $horasPorCodigo = [
+            '24'  => ['entrada' => '07:00:00', 'salida' => '07:00:00'],
+            '24E' => ['entrada' => '07:00:00', 'salida' => '07:00:00'],
+            '12'  => ['entrada' => '07:00:00', 'salida' => '19:00:00'],
+            '12E' => ['entrada' => '07:00:00', 'salida' => '19:00:00'],
+        ];
+        $codigosIncidencia = ['I', 'PCS', 'PSS'];
+        $codigosOmitir    = ['D', 'A', 'B', 'V']; // no generan asistencia
+
+        $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+        $periodoInicio = $nomina['periodo_inicio'] ?? date('Y-m-d');
+
+        foreach ($pendientes as $det) {
+            $idEmpRaw = (int)$det['id_empleado_raw'];
+            $empleado = $empleadosPorId[$idEmpRaw] ?? null;
+            $servicio = $serviciosPorId[(int)$det['id_servicio_raw']] ?? null;
+
+            if (!$empleado) $sinMatch++;
+
+            $calculo = ['sueldo_semanal' => 0, 'bono' => 0, 'tiempo_extra' => 0,
+                        'descuento_faltas' => 0, 'conteo_faltas' => 0,
+                        'conteo_pss' => 0, 'conteo_12e' => 0, 'conteo_24e' => 0,
+                        'conteo_incapacidad' => 0, 'conteo_vacaciones' => 0,
+                        'dias_pagados' => 0];
+            $diasArr = json_decode($det['calendario_json'] ?? '[]', true) ?: [];
+            $tabulador = null;
+
+            if ($empleado && $servicio) {
+                $key = $empleado['id_puesto'] . '_' . $servicio['id_zona'];
+                $tabulador = $tabuladorPorPar[$key] ?? null;
+                if ($tabulador) {
+                    $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador);
+                } else {
+                    $sinTabulador++;
+                }
+            }
+
+            // ── Deducciones ─────────────────────────────────────────────
+            $deducciones   = $deduccionesPorEmpleado[$idEmpRaw] ?? [];
+            $descFonacot   = $deducciones['fonacot']   ?? 0;
+            $descInfonavit = $deducciones['infonavit']  ?? 0;
+            $descPension   = $deducciones['pension']    ?? 0;
+
+            // ── Festivos en el periodo ───────────────────────────────────
+            $diasFestivos = \App\Libraries\FestivosLibrary::diasFestivosEnCalendario(
+                $diasArr, $nomina['periodo_inicio'] ?? date('Y-m-d')
+            );
+            $conteoFestivos = count($diasFestivos);
+            $salarioDiario  = $calculo['sueldo_semanal'] > 0
+                ? round($calculo['sueldo_semanal'] / 7, 4)
+                : 0;
+            $montoFestivos  = $conteoFestivos * $salarioDiario;
+
+            // ── Dobletes ─────────────────────────────────────────────────
+            $turnoEmp = $empleado ? ($empleado['id_turno'] ?? '24') : '24';
+            $turnoStr = (str_contains((string)$turnoEmp, '12')) ? '12' : '24';
+            $dobletes = \App\Libraries\FestivosLibrary::detectarDobletes(
+                $diasArr, $turnoStr, $salarioDiario
+            );
+
+            // ── ¿Es empleado nuevo en este periodo? ──────────────────────
+            $esNuevo = in_array('A', array_map('strtoupper', array_values($diasArr)));
+
+            $adicional       = (float)$det['adicional'];
+            $otrosDescuentos = (float)$det['otros_descuentos'];
+
+            // ── Sueldo tabulador base (una sola vez) ──────────────────────
+            $sueldoTabuladorBase = (float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750);
+
+            // ── Incapacidad (código 'I') ───────────────────────────────────
+            $diasIncapacidad = $calculo['conteo_incapacidad'] ?? 0;
+            $incap = \App\Libraries\NominaFiscalLibrary::calcularIncapacidad($sueldoTabuladorBase, $diasIncapacidad);
+
+            $descuentoIncapacidad = 0;
+            if ($diasIncapacidad > 0) {
+                $baseParaDescuento = $calculo['sueldo_semanal'] + $calculo['bono'] + $calculo['tiempo_extra'];
+                $descuentoIncapacidad = round(($baseParaDescuento / 15) * $diasIncapacidad, 2);
+            }
+
+            // ── Vacaciones (código 'V') ──────────────────────────────────
+            $conteoVacaciones = $calculo['conteo_vacaciones'] ?? 0;
+            $primaVacacional = \App\Libraries\NominaFiscalLibrary::calcularPrimaVacacional($sueldoTabuladorBase, $conteoVacaciones);
+
+            // ── Total final ──────────────────────────────────────────────
+            $totalFinal = max(0, round(
+                $calculo['sueldo_semanal']
+                + $calculo['bono']
+                + $calculo['tiempo_extra']
+                + $montoFestivos
+                + $dobletes['monto_extra']
+                + $primaVacacional
+                + $adicional
+                - $calculo['descuento_faltas']
+                - $descuentoIncapacidad
+                + $incap['incapacidad_empresa']
+                - $otrosDescuentos
+                - $descFonacot - $descInfonavit - $descPension, 2
+            ));
+
+            // ── Cálculo fiscal (ISR, IMSS, Subsidio, IAS) ────────────────
+            // El bloque fiscal SIEMPRE usa el sueldo fiscal FIJO ($4,750),
+            // nunca el sueldo tabulador real — la diferencia la absorbe la IAS.
+            $diasPagados   = (int)($calculo['dias_pagados'] ?? 15);
+            $tieneAltaBaja = ($calculo['conteo_alta'] ?? 0) > 0
+                        || ($calculo['conteo_baja'] ?? 0) > 0
+                        || ($calculo['es_baja'] ?? false);
+
+            // Días fiscales = 15 - F - PSS - A - B (fórmula validada del maestro)
+            $diasFiscales = max(0, 15
+                - ($calculo['conteo_faltas'] ?? 0)
+                - ($calculo['conteo_pss']    ?? 0)
+                - ($calculo['conteo_alta']   ?? 0)
+                - ($calculo['conteo_baja']   ?? 0)
+            );
+
+            // FIX: si el pago real ya se topó en 0 (+3 faltas que superan lo
+            // trabajado, o baja real sin días trabajados), el fiscal TAMBIÉN
+            // debe ser 0 completo — no solo el pago, todo el bloque fiscal.
+            if ($tieneAltaBaja && ($calculo['sueldo_semanal'] ?? 0) <= 0) {
+                $diasFiscales = 0;
+            }
+
+            $sdFijo = (\App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO - 4.0) / 15; // 316.40
+
+            $sueldoNetoPagarFiscal = $tieneAltaBaja
+                ? round($sdFijo * $diasFiscales, 2)
+                : $totalFinal;
+
+            $fiscal = \App\Libraries\NominaFiscalLibrary::calcular(
+                \App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO,
+                $sueldoNetoPagarFiscal,
+                $diasFiscales,
+                $descInfonavit,
+                $descFonacot,
+                $descPension
+            );
+
+            // ── Actualizar detalle de nómina con todos los campos ────────
+            // ── Actualizar detalle de nómina con todos los campos ────────
+            $db->table('nomina_fatiga_detalle')->where('id', $det['id'])->update([
+                'id_empleado'           => $empleado['id'] ?? null,
+                'zona'                  => $servicio['servicio'] ?? ($det['servicio'] ?? null),
+                'puesto'                => $empleado['puesto'] ?? null,
+                'conteo_faltas'         => $calculo['conteo_faltas'] ?? 0,
+                'conteo_pss'            => $calculo['conteo_pss'] ?? 0,
+                'conteo_12h_extra'      => $calculo['conteo_12e'] ?? 0,
+                'conteo_24h_extra'      => $calculo['conteo_24e'] ?? 0,
+                'conteo_festivos'       => $conteoFestivos,
+                'conteo_dobletes'       => $dobletes['count'],
+                'monto_festivos'        => round($montoFestivos, 2),
+                'monto_dobletes'        => $dobletes['monto_extra'],
+                'es_nuevo'              => $esNuevo ? 1 : 0,
+                'dias_pagados'          => $diasPagados,
+                'sueldo_semanal'        => $calculo['sueldo_semanal'],
+                'tiempo_extra'          => $calculo['tiempo_extra'],
+                'descuento_faltas'      => $calculo['descuento_faltas'],
+                'otros_descuentos'      => $otrosDescuentos,
+                'desc_fonacot'          => $descFonacot,
+                'desc_infonavit'        => $descInfonavit,
+                'desc_pension'          => $descPension,
+                'conteo_incapacidad'    => $diasIncapacidad,
+                'descuento_incapacidad' => $descuentoIncapacidad,
+                'incapacidad_100'       => $incap['incapacidad_100'],
+                'incapacidad_imss'      => $incap['incapacidad_imss'],
+                'incapacidad_empresa'   => $incap['incapacidad_empresa'],
+                'conteo_vacaciones'     => $conteoVacaciones,
+                'prima_vacacional'      => $primaVacacional,
+                'total'                 => $totalFinal,
+                // Campos fiscales
+                'sd'                    => $fiscal['sd'],
+                'sdi'                   => $fiscal['sdi'],
+                'ingreso_quincenal'     => $fiscal['ingreso_quincenal'],
+                'imss_obrero'           => $fiscal['imss_obrero'],
+                'isr_bruto'             => $fiscal['isr_bruto'],
+                'subsidio_empleo'       => $fiscal['subsidio_empleo'],
+                'isr_neto'              => $fiscal['isr_neto'],
+                'neto_fiscal'           => $fiscal['neto_fiscal'],   
+                'ias'                   => $fiscal['ias'],           
+                'total_dispersion'      => $fiscal['total_dispersion'], 
+                'pendiente_calculo'     => 0,
+            ]);
+
+            // ── Generar registros de asistencias_fatiga ──────────────────
+            if ($empleado && !empty($diasArr)) {
+                $idEmp  = (int)$empleado['id'];
+                $idUbic = (int)$det['id_servicio_raw'];
+
+                foreach ($diasArr as $numDia => $codigo) {
+                    $codigo = strtoupper(trim($codigo));
+
+                    $fecha = date('Y-m-d', strtotime($periodoInicio . ' +' . ((int)$numDia - (int)date('j', strtotime($periodoInicio))) . ' days'));
+
+                    if (in_array($codigo, $codigosOmitir)) continue;
+
+                    if (isset($horasPorCodigo[$codigo])) {
+                        $batchAsist[] = [
+                            'id_nomina_fatiga' => $idNomina,
+                            'id_empleado'      => $idEmp,
+                            'id_ubicacion'     => $idUbic,
+                            'fecha'            => $fecha,
+                            'hora'             => $horasPorCodigo[$codigo]['entrada'],
+                            'id_status'        => 1,
+                            'codigo_dia'       => $codigo,
+                            'estado'           => 'asistencia',
+                        ];
+                        $batchAsist[] = [
+                            'id_nomina_fatiga' => $idNomina,
+                            'id_empleado'      => $idEmp,
+                            'id_ubicacion'     => $idUbic,
+                            'fecha'            => $fecha,
+                            'hora'             => $horasPorCodigo[$codigo]['salida'],
+                            'id_status'        => 2,
+                            'codigo_dia'       => $codigo,
+                            'estado'           => 'asistencia',
+                        ];
+                    } elseif ($codigo === 'F') {
+                        $batchAsist[] = [
+                            'id_nomina_fatiga' => $idNomina,
+                            'id_empleado'      => $idEmp,
+                            'id_ubicacion'     => $idUbic,
+                            'fecha'            => $fecha,
+                            'hora'             => '07:00:00',
+                            'id_status'        => 1,
+                            'codigo_dia'       => 'F',
+                            'estado'           => 'falta',
+                        ];
+                    } elseif (in_array($codigo, $codigosIncidencia)) {
+                        $batchAsist[] = [
+                            'id_nomina_fatiga' => $idNomina,
+                            'id_empleado'      => $idEmp,
+                            'id_ubicacion'     => $idUbic,
+                            'fecha'            => $fecha,
+                            'hora'             => '07:00:00',
+                            'id_status'        => 1,
+                            'codigo_dia'       => $codigo,
+                            'estado'           => 'incidencia',
+                        ];
+                    }
+                }
+            }
+        }
+
+        // Guardar asistencias en batch — INSERT IGNORE para evitar duplicados
+        if ($batchAsist) {
+            foreach (array_chunk($batchAsist, 200) as $chunk) {
+                $db->table('asistencias_fatiga')->insertBatch($chunk);
+            }
+        }
+
+        $procesadasEnChunk = count($pendientes);
+
+        $db->query("
+            UPDATE nomina_fatiga SET filas_procesadas = filas_procesadas + ? WHERE id = ?
+        ", [$procesadasEnChunk, $idNomina]);
+
+        $restantes = $db->table('nomina_fatiga_detalle')
+            ->where('id_nomina', $idNomina)
+            ->where('pendiente_calculo', 1)
+            ->countAllResults();
+
+        if ($restantes === 0) {
+            return $this->finalizarNomina($idNomina);
+        }
+
+        $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => [
+                'id_nomina'           => $idNomina,
+                'procesadas_chunk'    => $procesadasEnChunk,
+                'filas_procesadas'    => (int)($nomina['filas_procesadas'] ?? 0),
+                'total'               => (int)($nomina['total_empleados'] ?? 0),
+                'restantes'           => $restantes,
+                'completo'            => false,
+                'sin_match_chunk'     => $sinMatch,
+                'sin_tabulador_chunk' => $sinTabulador,
+            ],
+        ]);
+    }
+
+
+    private function finalizarNomina(int $idNomina): mixed
+    {
+        $db = \Config\Database::connect();
+
+        $totalPagar = $db->table('nomina_fatiga_detalle')
+            ->selectSum('total')
+            ->where('id_nomina', $idNomina)
+            ->get()->getRow()->total ?? 0;
+
+        $sinMatch = $db->table('nomina_fatiga_detalle')
+            ->where('id_nomina', $idNomina)
+            ->where('id_empleado', null)
+            ->countAllResults();
+
+        // Marcar como completa la(s) carga(s) que ya no tienen pendientes
+        $db->query("
+            UPDATE nomina_fatiga_cargas c
+            SET c.estatus = 'completa'
+            WHERE c.id_nomina = ?
+            AND c.id NOT IN (
+                SELECT DISTINCT id_carga FROM nomina_fatiga_detalle
+                WHERE id_nomina = ? AND pendiente_calculo = 1 AND id_carga IS NOT NULL
+            )
+        ", [$idNomina, $idNomina]);
+
+        // El lote pasa a 'borrador' (revisable) SOLO si NINGUNA carga sigue procesando
+        $cargasPendientes = $db->table('nomina_fatiga_cargas')
+            ->where('id_nomina', $idNomina)
+            ->where('estatus', 'procesando')
+            ->countAllResults();
+
+        $nominaModel = new \App\Models\NominaFatigaModel();
+        $nominaModel->update($idNomina, [
+            'total_pagar' => $totalPagar,
+            'estatus'     => $cargasPendientes === 0 ? 'borrador' : 'procesando',
+        ]);
+
+        $actor = $this->request->jwtUser;
+        if ($actor) {
+            \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_NOMINA_FATIGA', 'nomina_fatiga', (string)$idNomina,
+                "Carga completa — total acumulado: {$totalPagar}, {$sinMatch} sin match, cargas pendientes: {$cargasPendientes}");
+        }
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => [
+                'id_nomina'          => $idNomina,
+                'completo'           => $cargasPendientes === 0,
+                'cargas_pendientes'  => $cargasPendientes,
+                'total_pagar'        => round((float)$totalPagar, 2),
+                'sin_match'          => $sinMatch,
+            ],
+        ]);
+    }
+
+    
+
+
+
+    /* ═══════════════════════════════════════════════════════════════
+       POST /api/v1/nomina-fatiga/procesar-xlsm
+       Procesa el xlsm completo en orden:
+         1) Hoja "Altas"      → INSERT IGNORE en empleados
+         2) Hoja "Bajas"      → UPDATE estatus=0 en empleados
+         3) Hoja "Asistencia" → iniciarAsistencia() (chunks)
+       Body: archivo=xlsm, nombre, periodo_inicio, periodo_fin
+    ═══════════════════════════════════════════════════════════════ */
+    public function procesarXlsm(): mixed
+    {
+        @set_time_limit(600);
+        @ini_set('memory_limit', '512M');
+
+        $actor = $this->request->jwtUser;
+
+        $archivo = $this->request->getFile('archivo');
+        if (!$archivo || !$archivo->isValid()) {
+            return $this->respond(['status' => 'error', 'message' => 'Debes subir un archivo .xlsm válido'], 400);
+        }
+
+        $idNominaExistente = (int)($this->request->getVar('id_nomina') ?? 0); // NUEVO
+        $nombre        = trim($this->request->getVar('nombre') ?? 'Nómina ' . date('Y-m-d H:i'));
+        $periodoInicio = $this->request->getVar('periodo_inicio') ?: null;
+        $periodoFin    = $this->request->getVar('periodo_fin') ?: null;
+
+        $tmpPath = WRITEPATH . 'uploads/' . $archivo->getRandomName();
+        $archivo->move(WRITEPATH . 'uploads', basename($tmpPath));
+
+        try {
+            $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($tmpPath);
+            $nombresReales = $reader->listWorksheetNames($tmpPath);
+            $buscadas      = ['altas', 'bajas', 'asistencia'];
+            $hojasAEncontrar = [];
+            foreach ($nombresReales as $nombreReal) {
+                if (in_array(strtolower(trim($nombreReal)), $buscadas, true)) {
+                    $hojasAEncontrar[] = $nombreReal;
+                }
+            }
+            if (empty($hojasAEncontrar)) {
+                @unlink($tmpPath);
+                return $this->respond([
+                    'status'  => 'error',
+                    'message' => 'El archivo no contiene ninguna hoja llamada Altas, Bajas o Asistencia. '
+                            . 'Hojas encontradas: ' . implode(', ', $nombresReales),
+                ], 422);
+            }
+            $reader->setLoadSheetsOnly($hojasAEncontrar);
+            $reader->setReadDataOnly(true);
+            $spreadsheet = $reader->load($tmpPath);
+        } catch (\Throwable $e) {
+            @unlink($tmpPath);
+            return $this->respond(['status' => 'error', 'message' => 'Error leyendo el archivo: ' . $e->getMessage()], 422);
+        }
+
+        $resultadoAltas = $this->procesarHojaAltas($spreadsheet, $actor);
+        $resultadoBajas = $this->procesarHojaBajas($spreadsheet, $actor);
+
+        try {
+            $filasAsistencia = $this->extraerFilasAsistenciaDesdeSpreadsheet($spreadsheet);
+        } catch (\Throwable $e) {
+            @unlink($tmpPath);
+            return $this->respond(['status' => 'error', 'message' => 'Error leyendo Asistencia: ' . $e->getMessage()], 422);
+        }
+        @unlink($tmpPath);
+
+        if (empty($filasAsistencia)) {
+            return $this->respond([
+                'status' => 'ok',
+                'message' => 'Altas y bajas procesadas. Sin filas de asistencia.',
+                'data' => ['altas' => $resultadoAltas, 'bajas' => $resultadoBajas, 'asistencia' => null],
+            ]);
+        }
+
+        $db = \Config\Database::connect();
+        $nominaModel = new \App\Models\NominaFatigaModel();
+
+        // ── Detectar zona/cliente/empresa mayoritarios ──────────────────
+        $idsServicioRaw = array_unique(array_filter(array_map(fn($f) => (int)($f['id_servicio'] ?? 0), $filasAsistencia)));
+        $nombreCarga = 'Sin zona detectada';
+        $idZonaCarga = $idClienteCarga = $idEmpresaCarga = null;
+
+        if ($idsServicioRaw) {
+            $rowZona = $db->query("
+                SELECT z.id AS id_zona, z.zona AS zona_nombre, c.id AS id_cliente, e.id AS id_empresa, COUNT(*) AS cuenta
+                FROM servicios s
+                JOIN zonas z    ON s.id_zona = z.id
+                JOIN clientes c ON s.id_cliente = c.id
+                JOIN empresas e ON s.id_empresa = e.id
+                WHERE s.id IN (" . implode(',', $idsServicioRaw) . ")
+                GROUP BY z.id, z.zona, c.id, e.id
+                ORDER BY cuenta DESC
+                LIMIT 1
+            ")->getRowArray();
+            if ($rowZona) {
+                $nombreCarga    = $rowZona['zona_nombre'] ?? 'Sin zona detectada';
+                $idZonaCarga    = $rowZona['id_zona'] ?? null;
+                $idClienteCarga = $rowZona['id_cliente'] ?? null;
+                $idEmpresaCarga = $rowZona['id_empresa'] ?? null;
+            }
+        }
+
+        // ── Lote: usar uno existente o crear uno nuevo ───────────────────
+        if ($idNominaExistente > 0) {
+            $loteExistente = $nominaModel->find($idNominaExistente);
+            if (!$loteExistente) {
+                return $this->respond(['status' => 'error', 'message' => 'El lote indicado no existe'], 404);
+            }
+            if (!in_array($loteExistente['estatus'], ['borrador', 'procesando'])) {
+                return $this->respond(['status' => 'error', 'message' => 'Ese lote ya fue aprobado/dispersado, no se pueden agregar más cargas'], 422);
+            }
+            $idNomina = $idNominaExistente;
+            $nominaModel->update($idNomina, ['estatus' => 'procesando']);
+        } else {
+            $idNomina = $nominaModel->insert([
+                'nombre'           => $nombre,
+                'periodo_inicio'   => $periodoInicio,
+                'periodo_fin'      => $periodoFin,
+                'archivo_original' => $archivo->getClientName(),
+                'total_empleados'  => 0,
+                'filas_procesadas' => 0,
+                'estatus'          => 'procesando',
+                'created_by'       => (int)$actor->id,
+                'created_at'       => date('Y-m-d H:i:s'),
+            ], true);
+        }
+
+        // ── Crear la carga ────────────────────────────────────────────────
+        $idCarga = $db->table('nomina_fatiga_cargas')->insert([
+            'id_nomina'        => $idNomina,
+            'nombre_carga'     => $nombreCarga,
+            'id_zona'          => $idZonaCarga,
+            'id_cliente'       => $idClienteCarga,
+            'id_empresa'       => $idEmpresaCarga,
+            'archivo_original' => $archivo->getClientName(),
+            'total_empleados'  => count($filasAsistencia),
+            'estatus'          => 'procesando',
+            'created_by'       => (int)$actor->id,
+            'created_at'       => date('Y-m-d H:i:s'),
+        ], true);
+
+        $batch = [];
+        foreach ($filasAsistencia as $fila) {
+            $batch[] = [
+                'id_nomina'         => $idNomina,
+                'id_carga'          => $idCarga, // NUEVO
+                'id_empleado'       => null,
+                'curp_excel'        => '',
+                'nombre_excel'      => $fila['nombre'] ?? '',
+                'zona'              => null,
+                'servicio'          => $fila['servicio'] ?? null,
+                'turno'             => null,
+                'puesto'            => null,
+                'calendario_json'   => json_encode($fila['dias'] ?? []),
+                'sueldo_semanal'    => 0,
+                'tiempo_extra'      => 0,
+                'adicional'         => (float)($fila['adicional'] ?? 0),
+                'descuento_faltas'  => 0,
+                'otros_descuentos'  => (float)($fila['otros_descuentos'] ?? 0),
+                'total'             => 0,
+                'pendiente_calculo' => 1,
+                'id_empleado_raw'   => (int)($fila['id_empleado'] ?? 0),
+                'id_servicio_raw'   => (int)($fila['id_servicio'] ?? 0),
+                'comentarios'       => $fila['comentarios'] ?? null,
+                'created_at'        => date('Y-m-d H:i:s'),
+            ];
+            if (count($batch) >= 500) {
+                $db->table('nomina_fatiga_detalle')->insertBatch($batch);
+                $batch = [];
+            }
+        }
+        if ($batch) $db->table('nomina_fatiga_detalle')->insertBatch($batch);
+
+        // Sumar (no sobrescribir) el total del lote
+        $db->query("UPDATE nomina_fatiga SET total_empleados = total_empleados + ? WHERE id = ?", [count($filasAsistencia), $idNomina]);
+
         return $this->respond([
             'status' => 'ok',
             'data'   => [
                 'altas'      => $resultadoAltas,
                 'bajas'      => $resultadoBajas,
                 'asistencia' => [
-                    'id_nomina'  => $idNomina,
-                    'total'      => count($filasAsistencia),
-                    'chunk_size' => self::CHUNK_SIZE_DEFAULT,
+                    'id_nomina'    => $idNomina,
+                    'id_carga'     => $idCarga,
+                    'nombre_carga' => $nombreCarga,
+                    'total'        => count($filasAsistencia),
+                    'chunk_size'   => self::CHUNK_SIZE_DEFAULT,
                 ],
             ],
         ], 201);
     }
+    
 
     /* ── Procesa hoja "Altas" → INSERT IGNORE en empleados ─────── */
     private function procesarHojaAltas(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet, object $actor): array

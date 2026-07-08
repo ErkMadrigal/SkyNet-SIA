@@ -44,21 +44,21 @@ $routes->group('api', function ($routes) {
         });
 
         $routes->group('nomina-fatiga', ['filter' => 'jwt'], function ($routes) {
-            $routes->get('/',                       'Api\V1\NominaFatigaController::index');
-            $routes->get('(:num)',                  'Api\V1\NominaFatigaController::show/$1');
-            $routes->post('procesar',               'Api\V1\NominaFatigaController::procesar');
-            $routes->put('(:num)/detalle/(:num)',   'Api\V1\NominaFatigaController::actualizarDetalle/$1/$2');
-            $routes->post('(:num)/aprobar',         'Api\V1\NominaFatigaController::aprobar/$1',   ['filter' => 'jwt:admin']);
-            $routes->post('(:num)/rechazar',        'Api\V1\NominaFatigaController::rechazar/$1',  ['filter' => 'jwt:admin']);
-            $routes->get('(:num)/dispersion',       'Api\V1\NominaFatigaController::dispersion/$1');
+            // Rutas de texto fijo PRIMERO (antes de cualquier (:num))
+            $routes->get('/',                    'Api\V1\NominaFatigaController::index');
+            $routes->get('lotes-abiertos',       'Api\V1\NominaFatigaController::lotesAbiertos');
+            $routes->post('procesar',            'Api\V1\NominaFatigaController::procesar');
             $routes->post('procesar-asistencia', 'Api\V1\NominaFatigaController::procesarAsistencia');
-            
-            $routes->post('iniciar-asistencia',        'Api\V1\NominaFatigaController::iniciarAsistencia');
-            $routes->post('(:num)/procesar-chunk',     'Api\V1\NominaFatigaController::procesarChunk/$1');
-            $routes->post('procesar-xlsm', 'Api\V1\NominaFatigaController::procesarXlsm');
+            $routes->post('iniciar-asistencia',  'Api\V1\NominaFatigaController::iniciarAsistencia');
+            $routes->post('procesar-xlsm',       'Api\V1\NominaFatigaController::procesarXlsm');
 
-            $routes->get('(:num)/dispersion', 'Api\V1\NominaFatigaController::dispersion/$1');
-
+            // Rutas con (:num) DESPUÉS
+            $routes->get('(:num)',                'Api\V1\NominaFatigaController::show/$1');
+            $routes->put('(:num)/detalle/(:num)', 'Api\V1\NominaFatigaController::actualizarDetalle/$1/$2');
+            $routes->post('(:num)/aprobar',       'Api\V1\NominaFatigaController::aprobar/$1',  ['filter' => 'jwt:admin']);
+            $routes->post('(:num)/rechazar',      'Api\V1\NominaFatigaController::rechazar/$1', ['filter' => 'jwt:admin']);
+            $routes->get('(:num)/dispersion',     'Api\V1\NominaFatigaController::dispersion/$1');
+            $routes->post('(:num)/procesar-chunk','Api\V1\NominaFatigaController::procesarChunk/$1');
         });
 
         $routes->group('deducciones', ['filter' => 'jwt:admin'], function ($routes) {
