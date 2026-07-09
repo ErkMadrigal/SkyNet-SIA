@@ -59,6 +59,8 @@ $routes->group('api', function ($routes) {
             $routes->post('(:num)/rechazar',      'Api\V1\NominaFatigaController::rechazar/$1', ['filter' => 'jwt:admin']);
             $routes->get('(:num)/dispersion',     'Api\V1\NominaFatigaController::dispersion/$1');
             $routes->post('(:num)/procesar-chunk','Api\V1\NominaFatigaController::procesarChunk/$1');
+            $routes->get('(:num)/exportar-xlsx', 'Api\V1\NominaFatigaController::exportarXlsx/$1');
+    
         });
 
         $routes->group('deducciones', ['filter' => 'jwt:admin'], function ($routes) {

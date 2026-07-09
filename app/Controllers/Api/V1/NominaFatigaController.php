@@ -719,9 +719,11 @@ class NominaFatigaController extends ResourceController
             $empleadosPorId = [];
             if ($idsEmpleado) {
                 $rows = $db->query("
-                    SELECT e.id, e.id_puesto, mp.valor AS puesto
+                    SELECT e.id, e.id_puesto, e.id_turno, e.modo_sueldo, e.salario_mensual, e.id_periocidad,
+                        mp.valor AS puesto, mper.valor AS periodicidad_valor
                     FROM empleados e
-                    LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+                    LEFT JOIN multicatalogo mp   ON e.id_puesto = mp.id
+                    LEFT JOIN multicatalogo mper ON e.id_periocidad = mper.id
                     WHERE e.id IN (" . implode(',', $idsEmpleado) . ")
                 ")->getResultArray();
                 foreach ($rows as $r) $empleadosPorId[(int)$r['id']] = $r;
@@ -979,7 +981,7 @@ class NominaFatigaController extends ResourceController
                 $diaCols[(int)$label] = $col;
             }
         }
-        ksort($diaCols);
+        // ksort($diaCols);
 
         $filas = [];
         $maxRow = $sheet->getHighestRow();
@@ -1101,20 +1103,17 @@ class NominaFatigaController extends ResourceController
      * Baja real (B):
      *   - Solo paga días trabajados, sin descuento
      */
-    private function calcularDesdeAsistencia(array $dias, array $tabulador): array
+    private function calcularDesdeAsistencia(array $dias, array $tabulador, int $diasPeriodo = 15, ?float $salarioDiarioOverride = null): array
+
     {
         $sueldoBase = (float)$tabulador['sueldo'];
         $bono       = (float)$tabulador['bono'];
 
-        // Dos bases de cálculo distintas:
-        // - $sd: usado para descuentos (F, PSS) — con exención de $4
-        // - $salarioDiarioCrudo: usado para dobletes (24E, 12E) — sin exención
-        $sd                 = ($sueldoBase - 4.0) / 15;
-        $salarioDiarioCrudo = round($sueldoBase / 15, 6);
+        $sd                 = $salarioDiarioOverride ?? (($sueldoBase - 4.0) / 15);
+        $salarioDiarioCrudo = $salarioDiarioOverride ?? round($sueldoBase / 15, 6);
 
-        // Tope a 15 días — ignorar día 16 si el archivo lo trae
-        // ⚠️ PENDIENTE de confirmar dirección (¿primeros 15 o últimos 15?)
-        $diasArray = array_slice(array_values($dias), 0, 15);
+        $diasArray = array_slice(array_values($dias), 0, $diasPeriodo);
+
 
         $conteoFaltas      = 0;
         $conteoPss         = 0;
@@ -1125,8 +1124,8 @@ class NominaFatigaController extends ResourceController
         $conteo24          = 0;
         $conteo12          = 0;
         $conteoDescanso    = 0;
-        $conteoIncapacidad = 0; // 'I'
-        $conteoVacaciones  = 0; // 'V'
+        $conteoIncapacidad = 0;
+        $conteoVacaciones  = 0;
 
         foreach ($diasArray as $codigo) {
             $codigo = strtoupper(trim((string)$codigo));
@@ -1145,19 +1144,14 @@ class NominaFatigaController extends ResourceController
             }
         }
 
-        // Detectar turno por mayoría de códigos (solo se usa para el descuento de falta)
         $esTurno24 = $conteo24 >= $conteo12;
+        $factorDescuento = $esTurno24 ? 4 : 2;
+        $FACTOR_24E = 2;
+        $FACTOR_12E = 1;
 
-        // Factor de descuento por falta — SÍ depende del turno detectado
-        $factorDescuento = $esTurno24 ? 4 : 2; // 24x24=4x, 12x12=2x
-
-        // Factores de doblete — FIJOS por código, NO dependen del turno del empleado
-        $FACTOR_24E = 2; // 24E siempre paga 2x salario diario extra
-        $FACTOR_12E = 1; // 12E siempre paga 1x salario diario extra
-
-        // Días trabajados/pagados = turnos reales + descanso (par del turno).
         $diasTrabajados = $conteo24 + $conteo12 + $conteo24e + $conteo12e + $conteoDescanso;
 
+        // Solo se usa para reportar, NO para decidir la rama punitiva
         $totalFaltas = $conteoFaltas + $conteoPss;
 
         $extraConteos = [
@@ -1189,10 +1183,13 @@ class NominaFatigaController extends ResourceController
             ], $extraConteos);
         }
 
-        // ── Más de 3 faltas (F+PSS juntas) = baja no avisada ─────────────
-        if ($totalFaltas > 3) {
+        // ── Más de 3 faltas REALES (F) = baja no avisada ─────────────
+        // ⚠️ FIX: solo cuenta $conteoFaltas (F real), NUNCA $conteoPss.
+        // PSS es permiso autorizado — por muchos días que tenga, jamás
+        // debe activar la rama punitiva de "baja no avisada".
+        if ($conteoFaltas > 3) {
             $sueldoDiasTrabajados = round($sd * $diasTrabajados, 2);
-            $descuentoTotalFaltas = $sd * $factorDescuento * $totalFaltas;
+            $descuentoTotalFaltas = $sd * $factorDescuento * $conteoFaltas;
             $sueldoPagado         = max(0, round($sueldoDiasTrabajados - $descuentoTotalFaltas, 2));
             $tiempoExtra          = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
                                 + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
@@ -1215,7 +1212,7 @@ class NominaFatigaController extends ResourceController
             ], $extraConteos);
         }
 
-        // ── PSS presente (con o sin F real, pero ≤3 incidencias en total) ──
+        // ── PSS presente (con o sin 0-3 F reales) ──────────────────────
         if ($conteoPss > 0) {
             $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
             $tiempoExtra      = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
@@ -1225,7 +1222,7 @@ class NominaFatigaController extends ResourceController
 
             return array_merge([
                 'sueldo_base'      => round($sueldoBase, 2),
-                'sueldo_semanal'   => round($sueldoPagado, 2), // controller suma tiempo_extra/bono aparte
+                'sueldo_semanal'   => round($sueldoPagado, 2),
                 'bono'             => 0,
                 'tiempo_extra'     => round($tiempoExtra, 2),
                 'descuento_faltas' => round($descuentoFaltas, 2),
@@ -1296,6 +1293,200 @@ class NominaFatigaController extends ResourceController
      *
      * Esto es RÁPIDO — solo lee y guarda datos crudos, no calcula nada todavía.
      */
+
+    
+    /**
+     * GET /api/v1/nomina-fatiga/{id}/exportar-xlsx
+     * Genera un .xlsx con 2 hojas: "Pre-nomina" y "Nomina Fiscal", con
+     * datos de identificación del empleado + su patrón de asistencia +
+     * los campos calculados de cada vista.
+     */
+    public function exportarXlsx($id = null): mixed
+    {
+    $idNomina = (int)$id;
+    $db = \Config\Database::connect();
+
+    $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+    if (!$nomina) {
+        return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
+    }
+
+    // ── Trae el detalle + datos de identificación del empleado + servicio ────
+    $rows = $db->query("
+        SELECT
+            nfd.*,
+            e.curp, e.rfc, e.CP_fiscal, e.nss, e.fecha_ingreso,
+            e.paterno, e.materno, e.nombre,
+            mt.valor AS turno_valor,
+            mp.valor AS puesto_valor,
+            e.clave_interbancaria,
+            mb.valor AS banco_valor,
+            srv.servicio      AS servicio_nombre,
+            srv.elementos      AS servicio_elementos,
+            srv.ubicacion      AS servicio_ubicacion,
+            cli.nombre_corto   AS cliente_nombre,
+            emp.empresa        AS empresa_nombre,
+            zon.zona           AS zona_nombre
+        FROM nomina_fatiga_detalle nfd
+        LEFT JOIN empleados e      ON e.id = nfd.id_empleado
+        LEFT JOIN multicatalogo mt ON e.id_turno = mt.id
+        LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+        LEFT JOIN multicatalogo mb
+            ON mb.id_catalogo = 15
+        AND mb.descripcion = LEFT(e.clave_interbancaria, 3)
+        LEFT JOIN servicios srv ON srv.id = nfd.id_servicio_raw
+        LEFT JOIN clientes  cli ON cli.id = srv.id_cliente
+        LEFT JOIN empresas  emp ON emp.id = srv.id_empresa
+        LEFT JOIN zonas     zon ON zon.id = srv.id_zona
+        WHERE nfd.id_nomina = ?
+        ORDER BY nfd.nombre_excel ASC
+    ", [$idNomina])->getResultArray();
+
+    if (empty($rows)) {
+        return $this->respond(['status' => 'error', 'message' => 'La nómina no tiene detalle'], 422);
+    }
+
+    // ── Orden canónico de los días del calendario (cronológico) ───────
+    // Se toma del primer registro con calendario, respetando el orden
+    // real de inserción del JSON (ya corregido, sin ksort).
+    $diasCanonicos = [];
+    foreach ($rows as $r) {
+        $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
+        if (!empty($cal)) {
+            $diasCanonicos = array_keys($cal);
+            break;
+        }
+    }
+
+    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+
+    $headersFijos = [
+        'CURP', 'RFC', 'CP Fiscal', 'NSS', 'Fecha Ingreso',
+        'Paterno', 'Materno', 'Nombre', 'Turno', 'Puesto',
+        'Clabe Interbancaria', 'Banco',
+        'Servicio', 'Elementos', 'Ubicación', 'Cliente', 'Empresa', 'Zona', // ← nuevas
+    ];
+    $headersDias = array_map(fn($d) => (string)$d, $diasCanonicos);
+
+    // ═══ HOJA 1 — PRE-NÓMINA ═══
+    $sheet1 = $spreadsheet->getActiveSheet();
+    $sheet1->setTitle('Pre-nomina');
+
+    $headersCalculo1 = [
+        'Zona', '★', 'Sueldo', 'Extra', 'Adicional', 'Fest/Dob',
+        'Faltas', 'FONACOT', 'INFONAVIT', 'Pensión', 'Otros',
+        'Neto pagar', 'Bono',
+    ];
+    $headers1 = array_merge($headersFijos, $headersDias, $headersCalculo1);
+    $sheet1->fromArray($headers1, null, 'A1');
+    $ultimaColLetra1 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers1));
+    $sheet1->getStyle("A1:{$ultimaColLetra1}1")->getFont()->setBold(true);
+
+    $rowNum = 2;
+    foreach ($rows as $r) {
+        $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
+        $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
+        $festDob  = round((float)($r['monto_festivos'] ?? 0) + (float)($r['monto_dobletes'] ?? 0), 2);
+
+        $fila = array_merge([
+            $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
+            $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
+            $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
+            $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
+            $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
+            $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
+        ], $diasVals, [
+            $r['zona'] ?? '',
+            ($r['es_nuevo'] ?? 0) == 1 ? 1 : 0,
+            (float)($r['sueldo_semanal'] ?? 0),
+            (float)($r['tiempo_extra'] ?? 0),
+            (float)($r['adicional'] ?? 0),
+            $festDob,
+            (float)($r['descuento_faltas'] ?? 0),
+            (float)($r['desc_fonacot'] ?? 0),
+            (float)($r['desc_infonavit'] ?? 0),
+            (float)($r['desc_pension'] ?? 0),
+            (float)($r['otros_descuentos'] ?? 0),
+            (float)($r['total'] ?? 0),
+            (float)($r['bono'] ?? 0),   
+        ]);
+
+        $sheet1->fromArray($fila, null, 'A' . $rowNum);
+        $rowNum++;
+    }
+
+    // ═══ HOJA 2 — NÓMINA FISCAL ═══
+    $sheet2 = $spreadsheet->createSheet();
+    $sheet2->setTitle('Nomina Fiscal');
+
+    $headersCalculo2 = [
+        'Días Lab.', 'SD', 'SDI', 'Ingreso Q', 'ISR antes Subs.',
+        'IMSS', 'INFONAVIT', 'FONACOT', 'Pensión', 'Subs. Empleo',
+        'ISR neto', 'Neto Fiscal', 'IAS', 'Total Disp.',
+    ];
+    $headers2 = array_merge($headersFijos, $headersDias, $headersCalculo2);
+    $sheet2->fromArray($headers2, null, 'A1');
+    $ultimaColLetra2 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers2));
+    $sheet2->getStyle("A1:{$ultimaColLetra2}1")->getFont()->setBold(true);
+
+    $rowNum = 2;
+    foreach ($rows as $r) {
+        $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
+        $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
+
+        $fila = array_merge([
+            $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
+            $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
+            $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
+            $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
+            $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
+            $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
+        ], $diasVals, [
+            (int)($r['dias_pagados'] ?? 0),
+            (float)($r['sd'] ?? 0),
+            (float)($r['sdi'] ?? 0),
+            (float)($r['ingreso_quincenal'] ?? 0),
+            (float)($r['isr_bruto'] ?? 0),
+            (float)($r['imss_obrero'] ?? 0),
+            (float)($r['desc_infonavit'] ?? 0),
+            (float)($r['desc_fonacot'] ?? 0),
+            (float)($r['desc_pension'] ?? 0),
+            (float)($r['subsidio_empleo'] ?? 0),
+            (float)($r['isr_neto'] ?? 0),
+            (float)($r['neto_fiscal'] ?? 0),
+            (float)($r['ias'] ?? 0),
+            (float)($r['total_dispersion'] ?? $r['total'] ?? 0),
+        ]);
+
+        $sheet2->fromArray($fila, null, 'A' . $rowNum);
+        $rowNum++;
+    }
+
+    $spreadsheet->setActiveSheetIndex(0);
+
+    // ── Autoajustar ancho de columnas en ambas hojas ─────────────────
+    foreach ([$sheet1, $sheet2] as $sh) {
+        $colIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sh->getHighestColumn());
+        for ($c = 1; $c <= $colIndex; $c++) {
+            $sh->getColumnDimensionByColumn($c)->setAutoSize(true);
+        }
+    }
+
+    $nombreArchivo = 'nomina_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $nomina['nombre']) . '_' . date('Ymd_His') . '.xlsx';
+    $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+    $writer->save($tmpPath);
+
+    $content = file_get_contents($tmpPath);
+    @unlink($tmpPath);
+
+    return $this->response
+        ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+        ->setBody($content);
+    }
+
     public function iniciarAsistencia(): mixed
     {
         @set_time_limit(600);
@@ -1513,9 +1704,11 @@ class NominaFatigaController extends ResourceController
         $empleadosPorId = [];
         if ($idsEmpleado) {
             $rows = $db->query("
-                SELECT e.id, e.id_puesto, e.id_turno, mp.valor AS puesto
+                SELECT e.id, e.id_puesto, e.id_turno, e.modo_sueldo, e.salario_mensual, e.id_periocidad,
+                    mp.valor AS puesto, mper.valor AS periodicidad_valor
                 FROM empleados e
-                LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+                LEFT JOIN multicatalogo mp   ON e.id_puesto = mp.id
+                LEFT JOIN multicatalogo mper ON e.id_periocidad = mper.id
                 WHERE e.id IN (" . implode(',', $idsEmpleado) . ")
             ")->getResultArray();
             foreach ($rows as $r) $empleadosPorId[(int)$r['id']] = $r;
@@ -1608,11 +1801,30 @@ class NominaFatigaController extends ResourceController
             $diasArr = json_decode($det['calendario_json'] ?? '[]', true) ?: [];
             $tabulador = null;
 
-            if ($empleado && $servicio) {
-                $key = $empleado['id_puesto'] . '_' . $servicio['id_zona'];
-                $tabulador = $tabuladorPorPar[$key] ?? null;
+            $diasPeriodo = 15;
+            if ($empleado && stripos((string)($empleado['periodicidad_valor'] ?? ''), 'semanal') !== false) {
+                $diasPeriodo = 7;
+            }
+
+            $salarioDiarioReal = null; // solo se usa en modo salario
+
+            if ($empleado) {
+                if (($empleado['modo_sueldo'] ?? 'tabulador') === 'salario' && (float)($empleado['salario_mensual'] ?? 0) > 0) {
+                    $divisorSueldo = ($diasPeriodo === 7) ? 4 : 2;
+                    $tabulador = [
+                        'id_puesto' => $empleado['id_puesto'],
+                        'sueldo'    => round((float)$empleado['salario_mensual'] / $divisorSueldo, 2),
+                        'bono'      => 0,
+                        'descuento' => 0,
+                    ];
+                    $salarioDiarioReal = round((float)$empleado['salario_mensual'] / 30, 6); // ← salario diario real, fijo, mensual/30
+                } elseif ($servicio) {
+                    $key = $empleado['id_puesto'] . '_' . $servicio['id_zona'];
+                    $tabulador = $tabuladorPorPar[$key] ?? null;
+                }
+
                 if ($tabulador) {
-                    $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador);
+                    $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador, $diasPeriodo, $salarioDiarioReal); // ← 4to parámetro
                 } else {
                     $sinTabulador++;
                 }
@@ -1689,7 +1901,7 @@ class NominaFatigaController extends ResourceController
                         || ($calculo['es_baja'] ?? false);
 
             // Días fiscales = 15 - F - PSS - A - B (fórmula validada del maestro)
-            $diasFiscales = max(0, 15
+            $diasFiscales = max(0, $diasPeriodo
                 - ($calculo['conteo_faltas'] ?? 0)
                 - ($calculo['conteo_pss']    ?? 0)
                 - ($calculo['conteo_alta']   ?? 0)
@@ -2126,47 +2338,72 @@ class NominaFatigaController extends ResourceController
             '127' => 1255, '137' => 1265, '145' => 1271,
         ];
 
+        // Lee una celda; si el valor crudo es una fórmula (empieza con "="),
+        // usa el valor cacheado del último guardado en Excel (igual que en Asistencia).
+        $leer = function (int $col, int $row) use ($sheet) {
+            $v = $sheet->getCell([$col, $row])->getValue();
+            if (is_string($v) && str_starts_with(trim($v), '=')) {
+                $v = $sheet->getCell([$col, $row])->getOldCalculatedValue();
+            }
+            return $v;
+        };
+
         $db = \Config\Database::connect();
         $batch = [];
         $procesadas = 0;
         $omitidas = 0;
 
         for ($r = 2; $r <= $sheet->getHighestRow(); $r++) {
-            $nombre = trim((string)($sheet->getCell([1, $r])->getValue() ?? ''));
-            $curp   = strtoupper(preg_replace('/[^A-Za-z0-9]/', '',
-                        (string)($sheet->getCell([4, $r])->getValue() ?? '')));
+            $nombre = trim((string)($leer(1, $r) ?? ''));
+            $curp   = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', (string)($leer(4, $r) ?? '')));
 
             if (!$nombre || !$curp) { $omitidas++; continue; }
 
-            $clabe = preg_replace('/\D/', '', (string)($sheet->getCell([24, $r])->getValue() ?? ''));
+            $clabe = preg_replace('/\D/', '', (string)($leer(24, $r) ?? ''));
             $codBanco = substr($clabe, 0, 3);
             $idBanco = $BANCO_MAP[$codBanco] ?? null;
 
-            $fechaRaw = $sheet->getCell([23, $r])->getValue();
+            // Fecha_Alta (col 23) — blindado contra valores corruptos
+            $fechaRaw = $leer(23, $r);
             $fecha = '2026-01-01';
             if ($fechaRaw instanceof \DateTime) {
                 $fecha = $fechaRaw->format('Y-m-d');
-            } elseif ($fechaRaw && is_numeric($fechaRaw)) {
-                $fecha = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject($fechaRaw)->format('Y-m-d');
+            } elseif ($fechaRaw && is_numeric($fechaRaw) && $fechaRaw > 0 && $fechaRaw < 60000) {
+                try {
+                    $fecha = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject($fechaRaw)->format('Y-m-d');
+                } catch (\Throwable $e) {
+                    $fecha = '2026-01-01';
+                }
+            } elseif (is_string($fechaRaw) && trim($fechaRaw) !== '') {
+                $ts = strtotime($fechaRaw);
+                if ($ts !== false) $fecha = date('Y-m-d', $ts);
             }
+
+            // Columnas VLOOKUP — ya resueltas vía $leer() con fallback a valor cacheado
+            $idEscolaridad = (int)($leer(10, $r) ?: 0) ?: null;
+            $idTipoSangre  = (int)($leer(12, $r) ?: 0) ?: null;
+            $idParentesco  = (int)($leer(16, $r) ?: 0) ?: null;
+            $idTurno       = (int)($leer(18, $r) ?: 0) ?: null;
+            $idPuesto      = (int)($leer(20, $r) ?: 0) ?: null;
+            $idPeriocidad  = (int)($leer(22, $r) ?: 0) ?: null;
 
             $batch[] = [
                 'nombre'              => $nombre,
-                'paterno'             => trim((string)($sheet->getCell([2, $r])->getValue() ?? '')),
-                'materno'             => trim((string)($sheet->getCell([3, $r])->getValue() ?? '')),
+                'paterno'             => trim((string)($leer(2, $r) ?? '')),
+                'materno'             => trim((string)($leer(3, $r) ?? '')),
                 'curp'                => $curp,
-                'rfc'                 => strtoupper(trim((string)($sheet->getCell([5, $r])->getValue() ?? ''))),
-                'nss'                 => preg_replace('/\D/', '', (string)($sheet->getCell([6, $r])->getValue() ?? '')),
-                'CP_fiscal'           => str_pad(preg_replace('/\D/', '', (string)($sheet->getCell([7, $r])->getValue() ?? '')), 5, '0', STR_PAD_LEFT) ?: '00000',
-                'alergias'            => strtoupper(trim((string)($sheet->getCell([8, $r])->getValue() ?? 'NINGUNA'))),
-                'escolaridad'         => (int)($sheet->getCell([10, $r])->getValue() ?: 0) ?: null,
-                'tipoSangre'          => (int)($sheet->getCell([12, $r])->getValue() ?: 0) ?: null,
-                'telefonoEmergencia'  => preg_replace('/\D/', '', (string)($sheet->getCell([13, $r])->getValue() ?? '')),
-                'nombreEmergencia'    => strtoupper(trim((string)($sheet->getCell([14, $r])->getValue() ?? ''))),
-                'parentesco'          => (int)($sheet->getCell([16, $r])->getValue() ?: 0) ?: null,
-                'id_turno'            => (int)($sheet->getCell([18, $r])->getValue() ?: 0) ?: null,
-                'id_puesto'           => (int)($sheet->getCell([20, $r])->getValue() ?: 0) ?: null,
-                'id_periocidad'       => (int)($sheet->getCell([22, $r])->getValue() ?: 0) ?: null,
+                'rfc'                 => strtoupper(trim((string)($leer(5, $r) ?? ''))),
+                'nss'                 => preg_replace('/\D/', '', (string)($leer(6, $r) ?? '')),
+                'CP_fiscal'           => str_pad(preg_replace('/\D/', '', (string)($leer(7, $r) ?? '')), 5, '0', STR_PAD_LEFT) ?: '00000',
+                'alergias'            => strtoupper(trim((string)($leer(8, $r) ?? 'NINGUNA'))),
+                'escolaridad'         => $idEscolaridad,
+                'tipoSangre'          => $idTipoSangre,
+                'telefonoEmergencia'  => preg_replace('/\D/', '', (string)($leer(13, $r) ?? '')),
+                'nombreEmergencia'    => strtoupper(trim((string)($leer(14, $r) ?? ''))),
+                'parentesco'          => $idParentesco,
+                'id_turno'            => $idTurno,
+                'id_puesto'           => $idPuesto,
+                'id_periocidad'       => $idPeriocidad,
                 'fecha_ingreso'       => $fecha,
                 'fecha_efectiva'      => $fecha,
                 'clave_interbancaria' => $clabe ?: null,
@@ -2183,7 +2420,6 @@ class NominaFatigaController extends ResourceController
             }
         }
         if ($batch) {
-            // INSERT IGNORE para no duplicar por CURP
             foreach (array_chunk($batch, 100) as $chunk) {
                 $db->query(
                     "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,id_banco,estatus,acceso_biometrico,created_by) VALUES " .
@@ -2274,7 +2510,7 @@ class NominaFatigaController extends ResourceController
                 $diaCols[(int)$label] = $col;
             }
         }
-        ksort($diaCols);
+        // ksort($diaCols);
 
         $filas = [];
         $leer  = fn($col, $r) => trim((string)($sheet->getCell([$col, $r])->getValue() ?? ''));
@@ -2311,16 +2547,11 @@ class NominaFatigaController extends ResourceController
         }
 
         // ── Match por nombre para empleados nuevos (id_empleado=0) ─────
-        // Los empleados dados de alta en este mismo periodo no tienen ID en el
-        // VLOOKUP del Excel porque aún no estaban en el catálogo interno.
-        // Después de procesar las Altas, buscamos por nombre en BD.
         $sinId = array_filter($filas, fn($f) => ($f['id_empleado'] ?? 0) === 0 && !empty($f['nombre']));
 
         if ($sinId) {
             $db = \Config\Database::connect();
 
-            // Bulk: traer todos los empleados activos con nombre concatenado
-            // para evitar 1 query por fila
             $nombresUnicos = array_unique(array_column(array_values($sinId), 'nombre'));
             $placeholders  = implode(',', array_fill(0, count($nombresUnicos), '?'));
 
@@ -2330,14 +2561,13 @@ class NominaFatigaController extends ResourceController
                     SELECT id, CONCAT(paterno, ' ', materno, ' ', nombre) AS nombre_completo
                     FROM empleados
                     WHERE CONCAT(paterno, ' ', materno, ' ', nombre) IN ({$placeholders})
-                      AND is_deleted = 0
+                    AND is_deleted = 0
                 ", $nombresUnicos)->getResultArray();
                 foreach ($rows as $r) {
                     $matchPorNombre[strtoupper(trim($r['nombre_completo']))] = (int)$r['id'];
                 }
             }
 
-            // Resolver IDs en las filas
             foreach ($filas as &$fila) {
                 if (($fila['id_empleado'] ?? 0) === 0 && !empty($fila['nombre'])) {
                     $nombreNorm = strtoupper(trim($fila['nombre']));
@@ -2351,5 +2581,5 @@ class NominaFatigaController extends ResourceController
 
         return $filas;
     }
-
+    
 }

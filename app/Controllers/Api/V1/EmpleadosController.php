@@ -500,6 +500,8 @@ class EmpleadosController extends ResourceController
                     'parentesco'         => $this->request->getVar('parentesco'),
                     'nombreEmergencia'   => $this->request->getVar('nombreEmergencia'),
                     'telefonoEmergencia' => $this->request->getVar('telefonoEmergencia'),
+                    'modo_sueldo'     => $this->request->getVar('modo_sueldo') ?? 'tabulador',
+                    'salario_mensual' => $this->request->getVar('salario_mensual') ?: null,
                     'updated_by'         => (int)$actor->id,
                 ];
 
