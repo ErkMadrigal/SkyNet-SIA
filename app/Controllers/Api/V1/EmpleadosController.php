@@ -250,10 +250,11 @@ class EmpleadosController extends ResourceController
         $actor = $this->request->jwtUser;
         $model = new EmpleadoModel();
 
-        $empleadosArr   = $this->request->getVar('empleados') ?? [];
-        $validateOnly   = (bool)($this->request->getVar('validate_only')   ?? false);
-        $failThreshold  = (float)($this->request->getVar('fail_threshold') ?? 0.80);
-        $allOrNothing   = (bool)($this->request->getVar('all_or_nothing')  ?? false);
+        $body = $this->request->getJSON(true);
+        $empleadosArr  = $body['empleados']      ?? [];
+        $validateOnly  = (bool)($body['validate_only']   ?? false);
+        $failThreshold = (float)($body['fail_threshold'] ?? 0.80);
+        $allOrNothing  = (bool)($body['all_or_nothing']  ?? false);
 
         if (!is_array($empleadosArr) || count($empleadosArr) === 0) {
             return $this->respond(['status' => 'error', 'message' => 'No se recibió el arreglo empleados[]'], 400);
@@ -395,6 +396,106 @@ class EmpleadosController extends ResourceController
             'errores'    => $errores,
             'detalle'    => $detalle,
         ]);
+    }
+
+
+    public function masivoDirecto(): mixed
+    {
+        @set_time_limit(0);
+        @ini_set('memory_limit', '1024M');
+
+        $actor = $this->request->jwtUser;
+        $db    = \Config\Database::connect();
+
+
+        $body = $this->request->getJSON(true); 
+        $empleadosArr = $body['empleados'] ?? [];
+
+        if (!is_array($empleadosArr) || count($empleadosArr) === 0) {
+            return $this->respond(['status' => 'error', 'message' => 'No se recibió el arreglo empleados[]'], 400);
+        }
+
+        $fotoDefault = $this->fotoBaseUrl . 'default.png';
+        $valores = [];
+
+        foreach ($empleadosArr as $emp) {
+            $curp  = trim($emp['curp'] ?? '');
+            $nombre = trim($emp['nombre'] ?? '');
+            if ($curp === '' || $nombre === '') continue;
+
+            $esc = fn($v) => str_replace("'", "''", (string)($v ?? ''));
+
+            $fecha = trim($emp['fecha_ingreso'] ?? '') ?: date('Y-m-d');
+            $fechaEfectiva = trim($emp['fecha_efectiva'] ?? '') ?: $fecha;
+
+            $idTurno       = is_numeric($emp['turno']        ?? null) ? (int)$emp['turno']        : 'NULL';
+            $idPuesto      = is_numeric($emp['puesto']       ?? null) ? (int)$emp['puesto']       : 'NULL';
+            $idPeriocidad  = is_numeric($emp['periodicidad'] ?? null) ? (int)$emp['periodicidad'] : 'NULL';
+            $idEscolaridad = is_numeric($emp['escolaridad']  ?? null) ? (int)$emp['escolaridad']  : 'NULL';
+            $idTipoSangre  = is_numeric($emp['tipoSangre']   ?? null) ? (int)$emp['tipoSangre']   : 'NULL';
+            $idParentesco  = is_numeric($emp['parentesco']   ?? null) ? (int)$emp['parentesco']   : 'NULL';
+
+            $valores[] = "('{$esc($nombre)}','{$esc($emp['paterno'] ?? '')}','{$esc($emp['materno'] ?? '')}'," .
+                "'{$esc($curp)}','{$esc($emp['rfc'] ?? '')}','{$esc($emp['nss'] ?? '')}'," .
+                "'{$esc($emp['cp'] ?? '')}','{$esc($emp['alergias'] ?? 'N/A')}'," .
+                "{$idEscolaridad},{$idTipoSangre}," .
+                "'{$esc($emp['telefonoEmergencia'] ?? '')}','{$esc($emp['nombreEmergencia'] ?? '')}'," .
+                "{$idParentesco},{$idTurno},{$idPuesto},{$idPeriocidad}," .
+                "'{$fecha}','{$fechaEfectiva}'," .
+                "'{$esc($emp['interbancaria'] ?? '')}'," .
+                "1,1,0,'{$esc($fotoDefault)}',{$actor->id})";
+        }
+
+        if (empty($valores)) {
+            return $this->respond(['status' => 'error', 'message' => 'Ninguna fila tenía CURP y nombre -- nada que insertar'], 422);
+        }
+
+        $insertadas = 0;
+        $chunks = array_chunk($valores, 500);
+
+        $db->transStart();
+
+        try {
+            foreach ($chunks as $chunk) {
+                $db->query(
+                    "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,estatus,acceso_biometrico,is_deleted,fotos,created_by) VALUES " .
+                    implode(',', $chunk)
+                );
+                $insertadas += $db->affectedRows();
+            }
+
+            $db->transComplete();
+
+            if ($db->transStatus() === false) {
+                throw new \RuntimeException('La transacción falló internamente sin lanzar excepción');
+            }
+
+        } catch (\Throwable $e) {
+            $db->transRollback();
+
+            \App\Libraries\AuditLibrary::log(
+                (int)$actor->id, 'CREAR_EMPLEADO_MASIVO_DIRECTO_ERROR', 'empleados', '-',
+                "Carga directa FALLÓ y se hizo ROLLBACK completo: " . $e->getMessage()
+            );
+
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'La carga falló y se revirtió por completo (rollback). Nada se insertó. Detalle: ' . $e->getMessage(),
+            ], 500);
+        }
+
+        \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_EMPLEADO_MASIVO_DIRECTO', 'empleados', '-',
+            "Carga DIRECTA sin validación: " . count($valores) . " filas enviadas, {$insertadas} insertadas (resto: duplicados por UNIQUE)");
+
+        return $this->respond([
+            'status'     => 'ok',
+            'message'    => 'Carga directa procesada (sin validación)',
+            'total'      => count($empleadosArr),
+            'insertados' => $insertadas,
+            'duplicados' => count($valores) - $insertadas,
+            'errores'    => count($empleadosArr) - count($valores),
+            'detalle'    => [],
+        ], 201);
     }
 
     /* ═══════════════════════════════════════════════════════════════

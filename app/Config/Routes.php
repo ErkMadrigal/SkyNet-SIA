@@ -161,7 +161,14 @@ $routes->group('api', function ($routes) {
 
             $routes->post('masivo-directo', 'Api\V1\EmpleadosController::masivoDirecto', ['filter' => ['jwt', 'importClave']]);
 
+
         });
+
+        $routes->group('importaciones', ['filter' => 'jwt'], function ($routes) {
+            $routes->post('historial', 'Api\V1\ImportacionesController::registrarHistorial');
+            $routes->get('historial',  'Api\V1\ImportacionesController::listadoHistorial');
+        });
+
         /* ─────────────────────────────────────────────────
            INCIDENCIAS
         ───────────────────────────────────────────────── */
@@ -225,6 +232,8 @@ $routes->group('api', function ($routes) {
             $routes->get('areas-geograficas/gerentes','Api\V1\CatalogosController::regionalesGerentes');
             $routes->get('clientes',                 'Api\V1\CatalogosController::clientes');
             $routes->get('servicios',                'Api\V1\CatalogosController::servicios');
+            $routes->post('servicios/masivo', 'Api\V1\CatalogosController::masivoServicios', ['filter' => ['jwt', 'importClave']]);
+
         });
 
         /* ─────────────────────────────────────────────────

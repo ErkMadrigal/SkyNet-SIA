@@ -25,6 +25,10 @@ class Filters extends BaseConfig
         'jwt'           => \App\Filters\JwtFilter::class,
         'apikey'        => \App\Filters\ApiKeyFilter::class,
         'cors'          => \App\Filters\CorsFilter::class,
+        'importClave' => \App\Filters\ImportacionMasivaFilter::class,
+
+
+
     ];
 
     // ── Sin filtros requeridos globales ──────────────────────────────────
