@@ -60,6 +60,9 @@ $routes->group('api', function ($routes) {
             $routes->get('(:num)/dispersion',     'Api\V1\NominaFatigaController::dispersion/$1');
             $routes->post('(:num)/procesar-chunk','Api\V1\NominaFatigaController::procesarChunk/$1');
             $routes->get('(:num)/exportar-xlsx', 'Api\V1\NominaFatigaController::exportarXlsx/$1');
+
+            $routes->get('(:num)/dispersion-ias',    'Api\V1\NominaFatigaController::dispersionIas/$1',    ['filter' => 'jwt']);
+            $routes->get('(:num)/dispersion-fiscal',  'Api\V1\NominaFatigaController::dispersionFiscal/$1',  ['filter' => 'jwt']);
     
         });
 
@@ -71,6 +74,12 @@ $routes->group('api', function ($routes) {
             $routes->get('resumen',    'Api\V1\DeduccionesController::resumen');
             $routes->delete('(:num)',  'Api\V1\DeduccionesController::delete/$1');
         });
+
+        $routes->group('importacion-masiva', ['filter' => ['jwt', 'importClave']], function ($routes) {
+            $routes->post('empleados',   'ImportacionMasivaController::empleados');
+            $routes->post('ubicaciones', 'ImportacionMasivaController::ubicaciones');
+        });
+
 
         /* ─────────────────────────────────────────────────
            AUTH — Rutas públicas (no requieren JWT)
@@ -140,15 +149,19 @@ $routes->group('api', function ($routes) {
             $routes->get('(:num)',        'Api\V1\EmpleadosController::show/$1');
 
             $routes->post('/',            'Api\V1\EmpleadosController::create');
-            $routes->post('masivo',       'Api\V1\EmpleadosController::masivo');
+
+            $routes->post('masivo',       'Api\V1\EmpleadosController::masivo', ['filter' => 'importClave']);
+
             $routes->put('(:num)',        'Api\V1\EmpleadosController::update/$1');
             $routes->post('(:num)/foto',  'Api\V1\EmpleadosController::subirFotoPerfil/$1');
 
-            $routes->post('baja-masiva',        'Api\V1\EmpleadosController::bajaMasiva',    ['filter' => 'jwt:admin']);
+            $routes->post('baja-masiva',        'Api\V1\EmpleadosController::bajaMasiva', ['filter' => ['jwt:admin', 'importClave']]);
             $routes->post('(:num)/baja',        'Api\V1\EmpleadosController::baja/$1',       ['filter' => 'jwt:admin']);
             $routes->post('(:num)/baja-accion', 'Api\V1\EmpleadosController::bajaAccion/$1', ['filter' => 'jwt:admin']);
-        });
 
+            $routes->post('masivo-directo', 'Api\V1\EmpleadosController::masivoDirecto', ['filter' => ['jwt', 'importClave']]);
+
+        });
         /* ─────────────────────────────────────────────────
            INCIDENCIAS
         ───────────────────────────────────────────────── */

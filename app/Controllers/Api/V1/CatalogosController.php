@@ -363,22 +363,27 @@ class CatalogosController extends ResourceController
     {
         $rules = [
             'servicio'   => 'required|max_length[255]',
-            'ubicacion'  => 'required|max_length[255]',
-            'cp'         => 'required|exact_length[5]',
-            'latitud'    => 'required|decimal',
-            'longitud'   => 'required|decimal',
+            'ubicacion'  => 'permit_empty|max_length[255]',
+            'cp'         => 'permit_empty|exact_length[5]',
+            'latitud'    => 'permit_empty|decimal',
+            'longitud'   => 'permit_empty|decimal',
             'id_cliente' => 'required|integer',
             'id_empresa' => 'required|integer',
+            'id_partida' => 'required|integer',
+            'id_zona'    => 'required|integer',
+            'status'     => 'required|integer',
         ];
         if (!$this->validate($rules)) {
             return $this->respond(['status' => 'error', 'errors' => $this->validator->getErrors()], 422);
         }
-        return $this->respond((new CatalogoModel())->insertServicio($this->request->getVar() ?: []), 201);
+    
+        $data = (array)$this->request->getVar();
+        return $this->respond((new CatalogoModel())->insertServicio($data ?: []), 201);
     }
-
+    
     public function actualizarServicio($id = null): mixed
     {
-        return $this->respond((new CatalogoModel())->updateServicio((int)$id, $this->request->getVar() ?: []));
+        return $this->respond((new CatalogoModel())->updateServicio((int)$id, (array)$this->request->getVar() ?: []));
     }
 
     public function eliminarServicio($id = null): mixed

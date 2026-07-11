@@ -1704,7 +1704,7 @@ class NominaFatigaController extends ResourceController
         $empleadosPorId = [];
         if ($idsEmpleado) {
             $rows = $db->query("
-                SELECT e.id, e.id_puesto, e.id_turno, e.modo_sueldo, e.salario_mensual, e.id_periocidad,
+                SELECT e.id, e.id_puesto, e.id_turno, e.modo_sueldo, e.salario_mensual, e.id_periocidad, e.fronterizo,
                     mp.valor AS puesto, mper.valor AS periodicidad_valor
                 FROM empleados e
                 LEFT JOIN multicatalogo mp   ON e.id_puesto = mp.id
@@ -1799,6 +1799,7 @@ class NominaFatigaController extends ResourceController
                         'conteo_incapacidad' => 0, 'conteo_vacaciones' => 0,
                         'dias_pagados' => 0];
             $diasArr = json_decode($det['calendario_json'] ?? '[]', true) ?: [];
+
             $tabulador = null;
 
             $diasPeriodo = 15;
@@ -1810,21 +1811,22 @@ class NominaFatigaController extends ResourceController
 
             if ($empleado) {
                 if (($empleado['modo_sueldo'] ?? 'tabulador') === 'salario' && (float)($empleado['salario_mensual'] ?? 0) > 0) {
-                    $divisorSueldo = ($diasPeriodo === 7) ? 4 : 2;
+                    $salarioDiarioReal = round((float)$empleado['salario_mensual'] / 30.4, 6);
+                    $sueldoDelPeriodo  = round($salarioDiarioReal * $diasPeriodo, 2);
+
                     $tabulador = [
                         'id_puesto' => $empleado['id_puesto'],
-                        'sueldo'    => round((float)$empleado['salario_mensual'] / $divisorSueldo, 2),
+                        'sueldo'    => $sueldoDelPeriodo,
                         'bono'      => 0,
                         'descuento' => 0,
                     ];
-                    $salarioDiarioReal = round((float)$empleado['salario_mensual'] / 30, 6); // ← salario diario real, fijo, mensual/30
                 } elseif ($servicio) {
                     $key = $empleado['id_puesto'] . '_' . $servicio['id_zona'];
                     $tabulador = $tabuladorPorPar[$key] ?? null;
                 }
 
                 if ($tabulador) {
-                    $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador, $diasPeriodo, $salarioDiarioReal); // ← 4to parámetro
+                    $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador, $diasPeriodo, $salarioDiarioReal);
                 } else {
                     $sinTabulador++;
                 }
@@ -1860,11 +1862,17 @@ class NominaFatigaController extends ResourceController
             $otrosDescuentos = (float)$det['otros_descuentos'];
 
             // ── Sueldo tabulador base (una sola vez) ──────────────────────
-            $sueldoTabuladorBase = (float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750);
+            $sueldoTabuladorBase = $salarioDiarioReal ? round($salarioDiarioReal * 15, 2) : (float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750);
+
+            // Para prima vacacional: la librería ya NO divide entre 15 internamente,
+            // así que aquí SÍ le pasamos el salario diario real directo, sin reconstruir.
+            $salarioDiarioParaVacaciones = $salarioDiarioReal
+                ?? round((float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750) / 15, 6);
 
             // ── Incapacidad (código 'I') ───────────────────────────────────
             $diasIncapacidad = $calculo['conteo_incapacidad'] ?? 0;
             $incap = \App\Libraries\NominaFiscalLibrary::calcularIncapacidad($sueldoTabuladorBase, $diasIncapacidad);
+
 
             $descuentoIncapacidad = 0;
             if ($diasIncapacidad > 0) {
@@ -1874,7 +1882,8 @@ class NominaFatigaController extends ResourceController
 
             // ── Vacaciones (código 'V') ──────────────────────────────────
             $conteoVacaciones = $calculo['conteo_vacaciones'] ?? 0;
-            $primaVacacional = \App\Libraries\NominaFiscalLibrary::calcularPrimaVacacional($sueldoTabuladorBase, $conteoVacaciones);
+            $primaVacacional = \App\Libraries\NominaFiscalLibrary::calcularPrimaVacacional($salarioDiarioParaVacaciones, $conteoVacaciones);
+
 
             // ── Total final ──────────────────────────────────────────────
             $totalFinal = max(0, round(
@@ -1915,14 +1924,19 @@ class NominaFatigaController extends ResourceController
                 $diasFiscales = 0;
             }
 
-            $sdFijo = (\App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO - 4.0) / 15; // 316.40
+            // Sueldo fiscal base: normal ($4,750 → SD=316.40) o fronterizo ($6,622.60 → SD=441.24)
+            $sueldoFiscalBase = (($empleado['fronterizo'] ?? 0) == 1)
+                ? \App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO_FRONTERA
+                : \App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO;
+
+            $sdFijo = ($sueldoFiscalBase - 4.0) / 15;
 
             $sueldoNetoPagarFiscal = $tieneAltaBaja
                 ? round($sdFijo * $diasFiscales, 2)
                 : $totalFinal;
 
             $fiscal = \App\Libraries\NominaFiscalLibrary::calcular(
-                \App\Libraries\NominaFiscalLibrary::SUELDO_FISCAL_FIJO,
+                $sueldoFiscalBase,
                 $sueldoNetoPagarFiscal,
                 $diasFiscales,
                 $descInfonavit,
@@ -2260,8 +2274,8 @@ class NominaFatigaController extends ResourceController
             ], true);
         }
 
-        // ── Crear la carga ────────────────────────────────────────────────
-        $idCarga = $db->table('nomina_fatiga_cargas')->insert([
+        // ✅ AHORA — insert() sin segundo argumento, luego insertID() por separado
+        $db->table('nomina_fatiga_cargas')->insert([
             'id_nomina'        => $idNomina,
             'nombre_carga'     => $nombreCarga,
             'id_zona'          => $idZonaCarga,
@@ -2272,7 +2286,13 @@ class NominaFatigaController extends ResourceController
             'estatus'          => 'procesando',
             'created_by'       => (int)$actor->id,
             'created_at'       => date('Y-m-d H:i:s'),
-        ], true);
+        ]);
+
+        $idCarga = $db->insertID();
+
+        if (!$idCarga) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo crear el registro de carga'], 500);
+        }
 
         $batch = [];
         foreach ($filasAsistencia as $fila) {
@@ -2504,6 +2524,22 @@ class NominaFatigaController extends ResourceController
         $colOtrosDesc = $headers['Otros Descuento'] ?? null;
         $colComents   = $headers['Comentarios'] ?? null;
 
+        $columnasRequeridas = [
+            'Nombre Completo' => $colNombre,
+            'ID_Empleado'      => $colIdEmp,
+            'Servicio'         => $colServicio,
+            'ID_servicio'      => $colIdServ,
+            'Adicional'        => $colAdicional,
+            'Otros Descuento'  => $colOtrosDesc,
+        ];
+        $faltantes = array_keys(array_filter($columnasRequeridas, fn($v) => $v === null));
+        if (!empty($faltantes)) {
+            throw new \RuntimeException(
+                'La hoja "Asistencia" no tiene estas columnas requeridas: ' . implode(', ', $faltantes) .
+                '. Headers encontrados: ' . implode(', ', array_keys($headers))
+            );
+        }
+
         $diaCols = [];
         foreach ($headers as $label => $col) {
             if (is_numeric($label) && $colIdServ && $colAdicional && $col > $colIdServ && $col < $colAdicional) {
@@ -2580,6 +2616,323 @@ class NominaFatigaController extends ResourceController
         }
 
         return $filas;
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════
+     * DISPERSION — IAS (formato fijo SPEI CSV) y NÓMINA FISCAL (formato a elegir)
+     * Pega estos métodos dentro de NominaFatigaController.
+     * Agrega las rutas correspondientes en Routes.php (ver abajo del archivo).
+     * ═══════════════════════════════════════════════════════════════
+     */
+
+    /**
+     * GET /api/v1/nomina-fatiga/{id}/dispersion-ias
+     *
+     * SIEMPRE en formato SPEI genérico (IASplantillas_para_SPEI.csv), sin
+     * opción de formato -- como pediste, el IAS siempre va por este canal.
+     *
+     * Columnas: Clabe/Tarjeta/Correo, Banco, Nombre completo o razon social
+     *           del beneficiario, Monto, Concepto, Referencia numerica
+     *
+     * Solo incluye empleados con IAS > 0 (si no tiene IAS, no hay nada que dispersar).
+     */
+    public function dispersionIas($id = null): mixed
+    {
+        $idNomina = (int)$id;
+        $db = \Config\Database::connect();
+
+        $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+        if (!$nomina) {
+            return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
+        }
+
+        $rows = $this->obtenerFilasDispersion($idNomina, 'ias');
+
+        if (empty($rows)) {
+            return $this->respond(['status' => 'error', 'message' => 'No hay empleados con IAS > 0 en esta nómina'], 422);
+        }
+
+        // Header exacto del CSV, tal como viene la plantilla original (con espacio después de la coma)
+        $csv = "Clabe/Tarjeta/Correo, Banco, Nombre completo o razon social del beneficiario, Monto, Concepto, Referencia numerica\r\n";
+
+        foreach ($rows as $r) {
+            $csv .= implode(',', [
+                $r['clabe'],
+                $r['banco'] ?: '',
+                '"' . str_replace('"', '', $r['nombre']) . '"',
+                number_format($r['monto'], 2, '.', ''),
+                'IAS ' . $nomina['nombre'],
+                '', // Referencia numérica — sin referencia fija por ahora
+            ]) . "\r\n";
+        }
+
+        $nombreArchivo = 'dispersion_IAS_' . $idNomina . '_' . date('Ymd_His') . '.csv';
+
+        $actor = $this->request->jwtUser;
+        $db->table('nomina_fatiga')->where('id', $idNomina)->update([
+            'ias_dispersado'    => 1,
+            'ias_dispersado_at' => date('Y-m-d H:i:s'),
+            'ias_dispersado_by' => (int)$actor->id,
+        ]);
+        $this->marcarNominaSiCompleta($idNomina); // ← agrega este helper (abajo)
+        
+        \App\Libraries\AuditLibrary::log((int)$actor->id, 'DISPERSAR_IAS', 'nomina_fatiga', (string)$idNomina,
+            'Generó dispersión IAS — ' . count($rows) . ' empleados');
+        
+
+        return $this->response
+            ->setHeader('Content-Type', 'text/csv; charset=utf-8')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+            ->setBody($csv);
+    }
+
+    /**
+     * dispersionFiscal() corregido — el marcado de "ya dispersada" solo pasa
+     * en el case 'albo', y solo DESPUÉS de confirmar que sí hay filas y que
+     * el archivo sí se va a generar. bajio/sindicato NUNCA marcan nada porque
+     * todavía tronan con 501.
+     */
+    public function dispersionFiscal($id = null): mixed
+    {
+        $idNomina = (int)$id;
+        $formato = strtolower(trim((string)($this->request->getVar('formato') ?? 'albo')));
+
+        $db = \Config\Database::connect();
+        $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+        if (!$nomina) {
+            return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
+        }
+
+        $rows = $this->obtenerFilasDispersion($idNomina, 'neto_fiscal');
+
+        // ✅ El check de vacío va PRIMERO, antes de marcar nada
+        if (empty($rows)) {
+            return $this->respond(['status' => 'error', 'message' => 'No hay empleados con neto_fiscal > 0 en esta nómina'], 422);
+        }
+
+        switch ($formato) {
+            case 'albo':
+                // ✅ El marcado SOLO pasa aquí, dentro del formato que sí funciona,
+                //    y justo antes de generar el archivo (no antes de saber si hay datos)
+                $actor = $this->request->jwtUser;
+                $db->table('nomina_fatiga')->where('id', $idNomina)->update([
+                    'fiscal_dispersado'    => 1,
+                    'fiscal_dispersado_at' => date('Y-m-d H:i:s'),
+                    'fiscal_dispersado_by' => (int)$actor->id,
+                    'fiscal_formato'       => $formato,
+                ]);
+                $this->marcarNominaSiCompleta($idNomina);
+
+                \App\Libraries\AuditLibrary::log((int)$actor->id, 'DISPERSAR_FISCAL', 'nomina_fatiga', (string)$idNomina,
+                    "Generó dispersión fiscal ({$formato}) — " . count($rows) . ' empleados');
+
+                return $this->generarDispersionAlbo($rows, $idNomina, $nomina);
+
+            case 'bajio':
+                // ❌ Sin marcado — todavía no genera nada real
+                return $this->respond([
+                    'status' => 'error',
+                    'message' => "El formato BAJIO todavía no está implementado -- necesitamos definir el catálogo de códigos de banco (ej. '138-ABC CAPITAL') y de dónde sale el folio/No. de Archivo antes de generarlo.",
+                ], 501);
+
+            case 'sindicato':
+                // ❌ Sin marcado — todavía no genera nada real
+                return $this->respond([
+                    'status' => 'error',
+                    'message' => "El formato SINDICATO todavía no está implementado -- necesitamos definir de dónde sale el FOLIO y la cuenta 'DEPOSITADO EN' / 'NO. CTA DE DEPÓSITO' del encabezado antes de generarlo.",
+                ], 501);
+
+            default:
+                return $this->respond(['status' => 'error', 'message' => "Formato '{$formato}' no reconocido. Usa: albo, bajio, sindicato"], 400);
+        }
+    }
+
+    /**
+     * Query compartida: trae empleado + banco + clabe + el monto que corresponda
+     * ($campoMonto = 'ias' o 'neto_fiscal'), solo filas con ese monto > 0.
+     */
+    private function obtenerFilasDispersion(int $idNomina, string $campoMonto): array
+    {
+        $db = \Config\Database::connect();
+
+        // Whitelist estricta -- $campoMonto nunca debe interpolarse sin validar,
+        // por seguridad contra inyección aunque el valor viene fijo del código.
+        $campoValido = in_array($campoMonto, ['ias', 'neto_fiscal'], true) ? $campoMonto : 'ias';
+
+        $rows = $db->query("
+            SELECT
+                nfd.nombre_excel,
+                COALESCE(e.curp, nfd.curp_excel, '')                          AS curp,
+                COALESCE(e.rfc, '')                                           AS rfc,
+                COALESCE(e.clave_interbancaria, nfd.clave_interbancaria, '')  AS clabe,
+                COALESCE(mc.valor, nfd.institucion_bancaria, '')              AS banco,
+                CONCAT(e.paterno, ' ', e.materno, ' ', e.nombre)              AS nombre_completo,
+                nfd.{$campoValido}                                            AS monto
+            FROM nomina_fatiga_detalle nfd
+            LEFT JOIN empleados e      ON e.id = nfd.id_empleado
+            LEFT JOIN multicatalogo mc ON mc.id = e.id_banco
+            WHERE nfd.id_nomina = ?
+            AND nfd.{$campoValido} > 0
+            ORDER BY nfd.nombre_excel ASC
+        ", [$idNomina])->getResultArray();
+
+        // Normaliza nombre/monto/clabe para uso genérico en todos los exports
+        return array_map(function ($r) {
+            $nombreCompleto = trim($r['nombre_completo']);
+            return [
+                'nombre' => ($nombreCompleto !== '' && $nombreCompleto !== '  ')
+                    ? $nombreCompleto
+                    : $r['nombre_excel'],
+                'rfc'    => $r['rfc'],
+                'clabe'  => preg_replace('/\D/', '', (string)$r['clabe']),
+                'banco'  => $r['banco'],
+                'monto'  => (float)$r['monto'],
+            ];
+        }, $rows);
+    }
+
+    /**
+     * Genera el .xlsx en formato ALBO "Transferencia Múltiple"
+     * Columnas: Alias o nombre, Cuenta CLABE, Monto, Concepto, Referencia
+     */
+    private function generarDispersionAlbo(array $rows, int $idNomina, array $nomina): mixed
+    {
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Datos');
+
+        $sheet->fromArray(['Alias o nombre (opcional)', 'Cuenta CLABE', 'Monto', 'Concepto (opcional)', 'Referencia (opcional)'], null, 'A1');
+
+        $rowNum = 2;
+        foreach ($rows as $r) {
+            // ALBO: alias máximo 40 caracteres, solo letras recomendado
+            $alias = mb_substr(preg_replace('/[^A-Za-zÁÉÍÓÚáéíóúÑñ ]/u', '', $r['nombre']), 0, 40);
+            $concepto = mb_substr('Nomina fiscal ' . $nomina['nombre'], 0, 40);
+
+            $sheet->fromArray([
+                $alias,
+                $r['clabe'],
+                round($r['monto'], 2),
+                $concepto,
+                '', // Referencia numérica — hasta 7 dígitos, sin referencia fija por ahora
+            ], null, 'A' . $rowNum);
+            $rowNum++;
+        }
+
+        $nombreArchivo = 'dispersion_fiscal_ALBO_' . $idNomina . '_' . date('Ymd_His') . '.xlsx';
+        $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer->save($tmpPath);
+
+        $content = file_get_contents($tmpPath);
+        @unlink($tmpPath);
+
+        return $this->response
+            ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+            ->setBody($content);
+    }
+
+     
+    /**
+     * Helper: si YA se dispersaron tanto IAS como Fiscal, marca la nómina
+     * completa como 'dispersada'. Agrégalo como método privado del controller.
+     */
+    private function marcarNominaSiCompleta(int $idNomina): void
+    {
+        $db = \Config\Database::connect();
+        $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+    
+        if (($nomina['ias_dispersado'] ?? 0) == 1 && ($nomina['fiscal_dispersado'] ?? 0) == 1) {
+            $db->table('nomina_fatiga')->where('id', $idNomina)->update(['estatus' => 'dispersada']);
+        }
+    }
+
+        /**
+     * POST /api/v1/empleados/masivo-directo
+     *
+     * ⚠️ SIN VALIDACIÓN. Inserta tal cual vengan los datos, confiando en que
+     * ya están limpios en origen. Única red de seguridad: INSERT IGNORE, para
+     * que un CURP/RFC/NSS duplicado (UNIQUE de la tabla) se salte esa fila sola
+     * en vez de tronar todo el lote.
+     *
+     * Body: { empleados:[] }  -- sin validate_only, sin fail_threshold,
+     * sin all_or_nothing (no aplican aquí, no hay nada que validar).
+     *
+     * Protegido igual que masivo() por el filtro importClave -- agrégalo a
+     * la ruta.
+     */
+    public function masivoDirecto(): mixed
+    {
+        @set_time_limit(0);
+        @ini_set('memory_limit', '1024M');
+
+        $actor = $this->request->jwtUser;
+        $db    = \Config\Database::connect();
+
+        $empleadosArr = $this->request->getVar('empleados') ?? [];
+        if (!is_array($empleadosArr) || count($empleadosArr) === 0) {
+            return $this->respond(['status' => 'error', 'message' => 'No se recibió el arreglo empleados[]'], 400);
+        }
+
+        $fotoDefault = $this->fotoBaseUrl . 'default.png';
+        $valores = [];
+
+        foreach ($empleadosArr as $emp) {
+            $curp  = trim($emp['curp'] ?? '');
+            $nombre = trim($emp['nombre'] ?? '');
+            if ($curp === '' || $nombre === '') continue; // el único filtro: sin CURP o sin nombre, no hay nada que insertar
+
+            $esc = fn($v) => str_replace("'", "''", (string)($v ?? ''));
+
+            $fecha = trim($emp['fecha_ingreso'] ?? '') ?: date('Y-m-d');
+            $fechaEfectiva = trim($emp['fecha_efectiva'] ?? '') ?: $fecha;
+
+            $idTurno       = is_numeric($emp['turno']        ?? null) ? (int)$emp['turno']        : 'NULL';
+            $idPuesto      = is_numeric($emp['puesto']       ?? null) ? (int)$emp['puesto']       : 'NULL';
+            $idPeriocidad  = is_numeric($emp['periodicidad'] ?? null) ? (int)$emp['periodicidad'] : 'NULL';
+            $idEscolaridad = is_numeric($emp['escolaridad']  ?? null) ? (int)$emp['escolaridad']  : 'NULL';
+            $idTipoSangre  = is_numeric($emp['tipoSangre']   ?? null) ? (int)$emp['tipoSangre']   : 'NULL';
+            $idParentesco  = is_numeric($emp['parentesco']   ?? null) ? (int)$emp['parentesco']   : 'NULL';
+
+            $valores[] = "('{$esc($nombre)}','{$esc($emp['paterno'] ?? '')}','{$esc($emp['materno'] ?? '')}'," .
+                "'{$esc($curp)}','{$esc($emp['rfc'] ?? '')}','{$esc($emp['nss'] ?? '')}'," .
+                "'{$esc($emp['cp'] ?? '')}','{$esc($emp['alergias'] ?? 'N/A')}'," .
+                "{$idEscolaridad},{$idTipoSangre}," .
+                "'{$esc($emp['telefonoEmergencia'] ?? '')}','{$esc($emp['nombreEmergencia'] ?? '')}'," .
+                "{$idParentesco},{$idTurno},{$idPuesto},{$idPeriocidad}," .
+                "'{$fecha}','{$fechaEfectiva}'," .
+                "'{$esc($emp['interbancaria'] ?? '')}'," .
+                "1,1,0,'{$esc($fotoDefault)}',{$actor->id})";
+        }
+
+        if (empty($valores)) {
+            return $this->respond(['status' => 'error', 'message' => 'Ninguna fila tenía CURP y nombre -- nada que insertar'], 422);
+        }
+
+        $insertadas = 0;
+        foreach (array_chunk($valores, 500) as $chunk) {
+            $db->query(
+                "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,estatus,acceso_biometrico,is_deleted,fotos,created_by) VALUES " .
+                implode(',', $chunk)
+            );
+            $insertadas += $db->affectedRows();
+        }
+
+        \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_EMPLEADO_MASIVO_DIRECTO', 'empleados', '-',
+            "Carga DIRECTA sin validación: " . count($valores) . " filas enviadas, {$insertadas} insertadas (resto: duplicados por UNIQUE)");
+
+        return $this->respond([
+            'status'     => 'ok',
+            'message'    => 'Carga directa procesada (sin validación)',
+            'total'      => count($empleadosArr),
+            'insertados' => $insertadas,
+            'duplicados' => count($valores) - $insertadas,
+            'errores'    => count($empleadosArr) - count($valores),
+            'detalle'    => [],
+        ], 201);
     }
     
 }

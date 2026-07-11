@@ -456,6 +456,156 @@ class CatalogoModel extends Model
             return ['status' => 'ok', 'mensaje' => 'Servicio creado correctamente', 'id' => $this->db->insertID()];
         } catch (\Exception $e) { return $this->fail($e->getMessage()); }
     }
+        /**
+    * POST /api/v1/catalogos/servicios/masivo
+    * Equivalente a EmpleadosController::masivo(), mismo patrón exacto,
+    * adaptado a servicios/ubicaciones.
+    *
+    * Body: { servicios:[], validate_only:bool, fail_threshold:float, all_or_nothing:bool }
+    *
+    * Cada item de servicios[] espera: servicio, elementos, ubicacion, cp,
+    * latitud, longitud, id_cliente, id_empresa, id_partida, id_zona
+    *
+    * Pégalo dentro de CatalogosController, junto a crearServicio() y
+    * actualizarServicio().
+    */
+    public function masivoServicios(): mixed
+    {
+        $actor = $this->request->jwtUser;
+        $model = new CatalogoModel();
+        $db    = \Config\Database::connect();
+
+        $serviciosArr  = $this->request->getVar('servicios') ?? [];
+        $validateOnly  = (bool)($this->request->getVar('validate_only')   ?? false);
+        $failThreshold = (float)($this->request->getVar('fail_threshold') ?? 0.80);
+        $allOrNothing  = (bool)($this->request->getVar('all_or_nothing')  ?? false);
+
+        if (!is_array($serviciosArr) || count($serviciosArr) === 0) {
+            return $this->respond(['status' => 'error', 'message' => 'No se recibió el arreglo servicios[]'], 400);
+        }
+
+        $total    = count($serviciosArr);
+        $errores  = 0;
+        $dupCount = 0;
+        $prevalid = [];
+
+        // ── Pre-validación ───────────────────────────────────────────
+        foreach ($serviciosArr as $idx => $s) {
+            $row    = isset($s['_row']) ? (int)$s['_row'] : ($idx + 1);
+            $rowErr = [];
+
+            $servicio  = trim($s['servicio']   ?? '');
+            $idCliente = trim((string)($s['id_cliente'] ?? ''));
+            $idEmpresa = trim((string)($s['id_empresa'] ?? ''));
+            $idPartida = trim((string)($s['id_partida'] ?? ''));
+            $idZona    = trim((string)($s['id_zona']    ?? ''));
+            $cp        = preg_replace('/\D/', '', $s['cp'] ?? '');
+
+            if ($servicio === '')  $rowErr[] = 'Servicio (nombre) obligatorio';
+            if ($idCliente === '') $rowErr[] = 'id_cliente obligatorio';
+            if ($idEmpresa === '') $rowErr[] = 'id_empresa obligatorio';
+            if ($idPartida === '') $rowErr[] = 'id_partida obligatorio';
+            if ($idZona === '')    $rowErr[] = 'id_zona obligatorio';
+            if ($cp !== '' && !preg_match('/^\d{5}$/', $cp)) $rowErr[] = 'CP inválido (5 dígitos)';
+
+            // Duplicado en BD: mismo nombre de servicio + misma zona, activo
+            $dupCount_local = 0;
+            if ($servicio !== '' && $idZona !== '') {
+                $existe = $db->table('servicios')
+                    ->where('servicio', $servicio)
+                    ->where('id_zona', (int)$idZona)
+                    ->where('estatus', 1)
+                    ->countAllResults();
+                if ($existe > 0) {
+                    $dupCount++;
+                    $rowErr[] = 'Duplicado en BD: ya existe ese servicio en esa zona';
+                }
+            }
+
+            $ok = count($rowErr) === 0;
+            $prevalid[] = ['row' => $row, 'ok' => $ok, 'errors' => $rowErr, 'data' => $s];
+            if (!$ok) $errores++;
+        }
+
+        $detalleResumen = fn($x) => ['row' => $x['row'], 'status' => $x['ok'] ? 'ok' : 'error', 'message' => $x['ok'] ? 'OK' : implode(' | ', $x['errors'])];
+
+        // ── Umbral de fallo ──────────────────────────────────────────
+        if ($total > 0 && ($errores / $total) >= $failThreshold) {
+            return $this->respond([
+                'status'     => 'error',
+                'message'    => 'Lote cancelado: ' . round(($errores / $total) * 100, 1) . '% de errores supera el umbral',
+                'total'      => $total, 'insertados' => 0,
+                'duplicados' => $dupCount, 'errores' => $errores,
+                'detalle'    => array_map($detalleResumen, $prevalid),
+            ], 422);
+        }
+
+        // ── Solo validar ─────────────────────────────────────────────
+        if ($validateOnly) {
+            return $this->respond([
+                'status'     => 'ok',
+                'message'    => 'Validación completada (sin insertar)',
+                'total'      => $total, 'insertados' => 0,
+                'duplicados' => $dupCount, 'errores' => $errores,
+                'detalle'    => array_map($detalleResumen, $prevalid),
+            ]);
+        }
+
+        // ── Insertar ─────────────────────────────────────────────────
+        $insertados = 0;
+        $detalle    = [];
+
+        if ($allOrNothing) $db->transStart();
+
+        foreach ($prevalid as $item) {
+            if (!$item['ok']) {
+                $detalle[] = ['row' => $item['row'], 'status' => 'error', 'message' => implode(' | ', $item['errors'])];
+                continue;
+            }
+
+            $s = $item['data'];
+
+            $datos = [
+                'servicio'   => trim($s['servicio']),
+                'elementos'  => trim((string)($s['elementos'] ?? '')),
+                'ubicacion'  => trim($s['ubicacion'] ?? ''),
+                'cp'         => preg_replace('/\D/', '', $s['cp'] ?? ''),
+                'latitud'    => trim((string)($s['latitud']  ?? '0')) ?: '0',
+                'longitud'   => trim((string)($s['longitud'] ?? '0')) ?: '0',
+                'id_cliente' => (int)$s['id_cliente'],
+                'id_empresa' => (int)$s['id_empresa'],
+                'id_partida' => (int)$s['id_partida'],
+                'id_zona'    => (int)$s['id_zona'],
+            ];
+
+            $res = $model->insertServicio($datos);
+
+            if ($res['status'] === 'ok') {
+                $insertados++;
+                $detalle[] = ['row' => $item['row'], 'status' => 'ok', 'message' => 'OK'];
+                \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_SERVICIO_MASIVO', 'servicios', (string)($res['id'] ?? ''), 'Carga masiva');
+            } else {
+                $errores++;
+                $detalle[] = ['row' => $item['row'], 'status' => 'error', 'message' => $res['mensaje'] ?? 'Error desconocido'];
+                if ($allOrNothing) {
+                    $db->transRollback();
+                    return $this->respond(['status' => 'error', 'message' => 'Rollback: fallo en fila ' . $item['row'], 'detalle' => $detalle], 500);
+                }
+            }
+        }
+
+        if ($allOrNothing) $db->transComplete();
+
+        return $this->respond([
+            'status'     => 'ok',
+            'message'    => $allOrNothing ? 'Lote insertado con transacción' : 'Lote procesado',
+            'total'      => $total,
+            'insertados' => $insertados,
+            'duplicados' => $dupCount,
+            'errores'    => $errores,
+            'detalle'    => $detalle,
+        ]);
+    }
 
     public function updateServicio(int $id, array $d): array
     {

@@ -40,7 +40,9 @@ class NominaFiscalLibrary
     // fiscal (SD, SDI, ISR, IMSS, Subsidio), sin importar su sueldo tabulador
     // real por puesto/zona. La diferencia entre el pago real y el neto
     // fiscal se absorbe en la IAS.
-    public const SUELDO_FISCAL_FIJO = 4750.00;
+    public const SUELDO_FISCAL_FIJO = 4750.00; //316.40
+    public const SUELDO_FISCAL_FIJO_FRONTERA = 6622.60; //441.24
+
 
     // Tasas IMSS obreras (LSS)
     private const IMSS_EXCEDENTE_OBR        = 0.004;
@@ -79,7 +81,7 @@ class NominaFiscalLibrary
      * @param int   $diasLaborados    Días efectivos del periodo (1-15)
      */
     public static function calcular(
-        float $sueldoTabulador,   // ya no se usa para SD — se ignora, ver nota abajo
+        float $sueldoTabulador,   
         float $sueldoNetoPagar,
         int   $diasLaborados   = 15,
         float $descInfonavit   = 0.0,
@@ -87,9 +89,10 @@ class NominaFiscalLibrary
         float $descPension     = 0.0
     ): array
     {
-        // El SD/SDI SIEMPRE se calculan sobre el sueldo fiscal fijo,
-        // nunca sobre el sueldo tabulador real del empleado.
-        [$sd, $sdi] = self::calcularSdSdi(self::SUELDO_FISCAL_FIJO);
+        // El SD/SDI se calculan sobre el sueldo fiscal FIJO que se le pase
+        // (normal $4,750 o fronterizo $6,622.60), nunca sobre el sueldo
+        // tabulador real de asistencia del empleado.
+        [$sd, $sdi] = self::calcularSdSdi($sueldoTabulador);
 
         $bi = round($sd * $diasLaborados, 2);
         $baseMensualIsr = $sd * 30.4;
@@ -124,7 +127,6 @@ class NominaFiscalLibrary
             'total_dispersion'  => $totalDispersion,
         ];
     }
-
     /**
      * Calcula el componente de incapacidad — validado contra Excel maestro
      * "CALCULO NOMINA" (empleados con código 'I' en el calendario).
@@ -162,11 +164,10 @@ class NominaFiscalLibrary
      *
      * @param int $diasVacaciones Días con código 'V' en el calendario
      */
-    public static function calcularPrimaVacacional(float $sueldoTabulador, int $diasVacaciones): float
+    public static function calcularPrimaVacacional(float $salarioDiario, int $diasVacaciones): float
     {
         if ($diasVacaciones <= 0) return 0.0;
-        $salarioDiarioNominal = $sueldoTabulador / 15;
-        return round($diasVacaciones * $salarioDiarioNominal * 0.25, 2);
+        return round($diasVacaciones * $salarioDiario * 0.25, 2);
     }
 
     /** SD y SDI a partir del sueldo tabulador — misma fórmula que usa calcular() */
