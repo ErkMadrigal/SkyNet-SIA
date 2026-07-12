@@ -864,14 +864,12 @@ class EmpleadosController extends ResourceController
         }
 
         $db = \Config\Database::connect();
-
-        // Usamos query() con bind params -- CONCAT_WS() como expresión cruda
-        // no funciona bien con el Query Builder (intenta poner backticks
-        // alrededor de la expresión completa como si fuera un nombre de columna).
         $like = '%' . $q . '%';
 
         $rows = $db->query("
-            SELECT e.id AS no_empleado_raw
+            SELECT
+                e.id AS no_empleado_raw,
+                CONCAT_WS(' ', e.nombre, e.paterno, e.materno) AS nombreCompleto
             FROM empleados e
             WHERE e.is_deleted = 0
             AND (
@@ -887,10 +885,10 @@ class EmpleadosController extends ResourceController
             LIMIT 50
         ", [$like, $like, $like, $like, $like, $like, $like, $like])->getResultArray();
 
-        $resultado = array_map(
-            fn($r) => ['no_empleado' => str_pad((string)$r['no_empleado_raw'], 6, '0', STR_PAD_LEFT)],
-            $rows
-        );
+        $resultado = array_map(fn($r) => [
+            'no_empleado'    => str_pad((string)$r['no_empleado_raw'], 6, '0', STR_PAD_LEFT),
+            'nombreCompleto' => $r['nombreCompleto'],
+        ], $rows);
 
         return $this->respond([
             'status' => 'ok',
