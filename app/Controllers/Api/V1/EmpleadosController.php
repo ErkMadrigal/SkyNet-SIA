@@ -399,7 +399,7 @@ class EmpleadosController extends ResourceController
     }
 
 
-    public function masivoDirecto(): mixed
+        public function masivoDirecto(): mixed
     {
         @set_time_limit(0);
         @ini_set('memory_limit', '1024M');
@@ -407,8 +407,7 @@ class EmpleadosController extends ResourceController
         $actor = $this->request->jwtUser;
         $db    = \Config\Database::connect();
 
-
-        $body = $this->request->getJSON(true); 
+        $body = $this->request->getJSON(true);
         $empleadosArr = $body['empleados'] ?? [];
 
         if (!is_array($empleadosArr) || count($empleadosArr) === 0) {
@@ -416,14 +415,67 @@ class EmpleadosController extends ResourceController
         }
 
         $fotoDefault = $this->fotoBaseUrl . 'default.png';
+        $detalle = [];
+
+        // ── PASO 1: separa filas sin CURP/nombre ──────────────────────────
+        $candidatos = [];
+        foreach ($empleadosArr as $emp) {
+            $row  = $emp['_row'] ?? null;
+            $curp = trim($emp['curp'] ?? '');
+            $nombreOriginal = trim($emp['nombre'] ?? '');
+
+            if ($curp === '' || $nombreOriginal === '') {
+                $detalle[] = ['row' => $row, 'status' => 'error', 'message' => 'Falta CURP o nombre'];
+                continue;
+            }
+
+            $candidatos[] = ['row' => $row, 'curp' => strtoupper($curp), 'emp' => $emp];
+        }
+
+        // ── PASO 2: duplicados DENTRO del mismo archivo ───────────────────
+        $vistos = [];
+        $paraInsertar = [];
+        foreach ($candidatos as $c) {
+            if (isset($vistos[$c['curp']])) {
+                $detalle[] = ['row' => $c['row'], 'status' => 'error', 'message' => "CURP duplicado en el archivo ({$c['curp']})"];
+                continue;
+            }
+            $vistos[$c['curp']] = true;
+            $paraInsertar[] = $c;
+        }
+
+        // ── PASO 3: bulk-fetch de CURPs que YA existen en BD ──────────────
+        $curpsUnicos = array_column($paraInsertar, 'curp');
+        $existentes = [];
+        foreach (array_chunk($curpsUnicos, 1000) as $chunk) {
+            if (!$chunk) continue;
+            $ph = implode(',', array_fill(0, count($chunk), '?'));
+            $rows = $db->query("SELECT curp FROM empleados WHERE curp IN ({$ph})", $chunk)->getResultArray();
+            foreach ($rows as $r) $existentes[$r['curp']] = true;
+        }
+
+        $final = [];
+        foreach ($paraInsertar as $c) {
+            if (isset($existentes[$c['curp']])) {
+                $detalle[] = ['row' => $c['row'], 'status' => 'error', 'message' => "CURP ya existe en la base de datos ({$c['curp']})"];
+                continue;
+            }
+            $final[] = $c;
+        }
+
+        // ── PASO 4: arma $valores[] SOLO con los que sí van a insertarse ──
+        $esc = fn($v) => str_replace("'", "''", (string)($v ?? ''));
         $valores = [];
 
-        foreach ($empleadosArr as $emp) {
-            $curp  = trim($emp['curp'] ?? '');
-            $nombre = $this->normalizarTexto($emp['nombre'] ?? '');
-            if ($curp === '' || $nombre === '') continue;
+        foreach ($final as $c) {
+            $emp  = $c['emp'];
+            $curp = $c['curp'];
 
-            $esc = fn($v) => str_replace("'", "''", (string)($v ?? ''));
+            $nombre  = $this->normalizarTexto($emp['nombre'] ?? '');
+            $paterno = $this->normalizarTexto($emp['paterno'] ?? '');
+            $materno = $this->normalizarTexto($emp['materno'] ?? '');
+            $alergias = $this->normalizarTexto($emp['alergias'] ?? '') ?: 'N/A';
+            $nombreEmergencia = $this->normalizarTexto($emp['nombreEmergencia'] ?? '');
 
             $fecha = trim($emp['fecha_ingreso'] ?? '') ?: date('Y-m-d');
             $fechaEfectiva = trim($emp['fecha_efectiva'] ?? '') ?: $fecha;
@@ -435,13 +487,12 @@ class EmpleadosController extends ResourceController
             $idTipoSangre  = is_numeric($emp['tipoSangre']   ?? null) ? (int)$emp['tipoSangre']   : 'NULL';
             $idParentesco  = is_numeric($emp['parentesco']   ?? null) ? (int)$emp['parentesco']   : 'NULL';
 
-            $paterno = $this->normalizarTexto($emp['paterno'] ?? '');
-            $materno = $this->normalizarTexto($emp['materno'] ?? '');
-            $alergias = $this->normalizarTexto($emp['alergias'] ?? '') ?: 'N/A';
-            $nombreEmergencia = $this->normalizarTexto($emp['nombreEmergencia'] ?? '');
+            $salarioMensual = is_numeric($emp['salario_mensual'] ?? null) && (float)$emp['salario_mensual'] > 0
+                ? (float)$emp['salario_mensual']
+                : null;
+            $modoSueldo = $salarioMensual !== null ? 'salario' : 'tabulador';
 
             $valores[] = "('{$esc($nombre)}','{$esc($paterno)}','{$esc($materno)}'," .
-
                 "'{$esc($curp)}','{$esc($emp['rfc'] ?? '')}','{$esc($emp['nss'] ?? '')}'," .
                 "'{$esc($emp['cp'] ?? '')}','{$esc($alergias)}'," .
                 "{$idEscolaridad},{$idTipoSangre}," .
@@ -449,13 +500,24 @@ class EmpleadosController extends ResourceController
                 "{$idParentesco},{$idTurno},{$idPuesto},{$idPeriocidad}," .
                 "'{$fecha}','{$fechaEfectiva}'," .
                 "'{$esc($emp['interbancaria'] ?? '')}'," .
-                "1,1,0,'{$esc($fotoDefault)}',{$actor->id})";
+                "1,1,0,'{$esc($fotoDefault)}',{$actor->id}," .
+                "'{$modoSueldo}'," . ($salarioMensual !== null ? $salarioMensual : 'NULL') .
+                ")";
         }
 
         if (empty($valores)) {
-            return $this->respond(['status' => 'error', 'message' => 'Ninguna fila tenía CURP y nombre -- nada que insertar'], 422);
+            return $this->respond([
+                'status'     => 'ok',
+                'message'    => 'No había filas nuevas por insertar (todas eran duplicadas o inválidas)',
+                'total'      => count($empleadosArr),
+                'insertados' => 0,
+                'duplicados' => count($empleadosArr) - count($valores),
+                'errores'    => count($detalle),
+                'detalle'    => $detalle,
+            ], 200);
         }
 
+        // ── PASO 5: insertar con transacción (sin cambios respecto a antes) ──
         $insertadas = 0;
         $chunks = array_chunk($valores, 500);
 
@@ -464,7 +526,7 @@ class EmpleadosController extends ResourceController
         try {
             foreach ($chunks as $chunk) {
                 $db->query(
-                    "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,estatus,acceso_biometrico,is_deleted,fotos,created_by) VALUES " .
+                    "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,estatus,acceso_biometrico,is_deleted,fotos,created_by,modo_sueldo,salario_mensual) VALUES " .
                     implode(',', $chunk)
                 );
                 $insertadas += $db->affectedRows();
@@ -490,18 +552,151 @@ class EmpleadosController extends ResourceController
             ], 500);
         }
 
+        $duplicadosPrevios = count($empleadosArr) - count($valores);
+
         \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_EMPLEADO_MASIVO_DIRECTO', 'empleados', '-',
-            "Carga DIRECTA sin validación: " . count($valores) . " filas enviadas, {$insertadas} insertadas (resto: duplicados por UNIQUE)");
+            "Carga DIRECTA sin validación: {$insertadas} insertadas de " . count($empleadosArr) . " ({$duplicadosPrevios} duplicados)");
 
         return $this->respond([
             'status'     => 'ok',
             'message'    => 'Carga directa procesada (sin validación)',
             'total'      => count($empleadosArr),
             'insertados' => $insertadas,
-            'duplicados' => count($valores) - $insertadas,
-            'errores'    => count($empleadosArr) - count($valores),
-            'detalle'    => [],
+            'duplicados' => $duplicadosPrevios,
+            'errores'    => count($detalle),
+            'detalle'    => $detalle,
         ], 201);
+    }
+
+    /**
+     * POST /api/v1/empleados/actualizar-masivo-dinamico
+     *
+     * Actualización masiva GENÉRICA -- el ID siempre es la llave (WHERE id=?),
+     * pero los CAMPOS a actualizar son dinámicos: hoy puede ser salario_mensual,
+     * mañana fecha_ingreso, pasado telefonoEmergencia -- lo que traiga el Excel.
+     *
+     * Body: { empleados: [{ id: 177, salario_mensual: 15000, modo_sueldo: 'salario' }, ...] }
+     *
+     * SEGURIDAD: solo se actualizan campos que estén en la lista blanca
+     * CAMPOS_ACTUALIZABLES. Cualquier campo fuera de esa lista se ignora
+     * silenciosamente -- así el Excel puede traer columnas nuevas sin que
+     * eso represente riesgo de inyección o de tocar columnas protegidas
+     * (id, created_at, created_by, is_deleted, etc.)
+     */
+
+    /** Lista blanca de columnas que este endpoint puede tocar */
+    private const CAMPOS_ACTUALIZABLES = [
+        'CP_fiscal', 'fecha_ingreso', 'fecha_efectiva',
+        'id_turno', 'id_puesto', 'alergias', 'fotos', 'id_periocidad',
+        'tipoSangre', 'escolaridad', 'parentesco',
+        'nombreEmergencia', 'telefonoEmergencia',
+        'estatus', 'estado_actual', 'ultima_actividad', 'gerente', 'acceso_biometrico',
+        'id_hospital', 'id_ubicacion_principal',
+        'modo_sueldo', 'salario_mensual',
+        'fronterizo', 'dispersion_alterna',
+    ];
+
+    public function actualizarMasivoDinamico(): mixed
+    {
+        @set_time_limit(0);
+        @ini_set('memory_limit', '512M');
+
+        $actor = $this->request->jwtUser;
+        $db    = \Config\Database::connect();
+
+        $body = $this->request->getJSON(true);
+        $empleadosArr = $body['empleados'] ?? [];
+
+        if (!is_array($empleadosArr) || count($empleadosArr) === 0) {
+            return $this->respond(['status' => 'error', 'message' => 'No se recibió el arreglo empleados[]'], 400);
+        }
+
+        $actualizados = 0;
+        $camposVistos = [];
+        $detalle = []; // 👈 NUEVO -- aquí se acumula el motivo por cada fila que NO se actualizó
+
+        $db->transStart();
+
+        try {
+            foreach ($empleadosArr as $emp) {
+                $row = $emp['_row'] ?? null;
+                $id  = (int)($emp['id'] ?? 0);
+
+                if ($id <= 0) {
+                    $detalle[] = ['row' => $row, 'status' => 'error', 'message' => 'Fila sin id válido'];
+                    continue;
+                }
+
+                $set = [];
+                foreach ($emp as $campo => $valor) {
+                    if ($campo === 'id' || $campo === '_row') continue;
+                    if (!in_array($campo, self::CAMPOS_ACTUALIZABLES, true)) continue;
+                    $set[$campo] = ($valor === '' ? null : $valor);
+                    $camposVistos[$campo] = true;
+                }
+
+                if (empty($set)) {
+                    $detalle[] = ['row' => $row, 'status' => 'error', 'message' => "Ninguno de los campos enviados es actualizable (id={$id})"];
+                    continue;
+                }
+
+                $set['updated_at'] = date('Y-m-d H:i:s');
+                $set['updated_by'] = (int)$actor->id;
+
+                $db->table('empleados')->where('id', $id)->update($set);
+
+                // affectedRows() en 0 significa que el id no existe o el valor ya era igual
+                if ($db->affectedRows() === 0) {
+                    // Verifica si el id realmente existe -- si no, es un error real;
+                    // si sí existe pero no hubo cambio, no es un error (dato idéntico)
+                    $existe = $db->table('empleados')->where('id', $id)->countAllResults();
+                    if (!$existe) {
+                        $detalle[] = ['row' => $row, 'status' => 'error', 'message' => "El id={$id} no existe en empleados"];
+                        continue;
+                    }
+                    // Existe pero sin cambio real -- lo contamos como actualizado igual,
+                    // ya que la fila SÍ fue procesada correctamente (dato ya estaba así)
+                }
+
+                $actualizados++;
+            }
+
+            $db->transComplete();
+
+            if ($db->transStatus() === false) {
+                throw new \RuntimeException('La transacción falló internamente sin lanzar excepción');
+            }
+
+        } catch (\Throwable $e) {
+            $db->transRollback();
+
+            \App\Libraries\AuditLibrary::log(
+                (int)$actor->id, 'ACTUALIZAR_EMPLEADO_MASIVO_DINAMICO_ERROR', 'empleados', '-',
+                "Actualización dinámica FALLÓ, rollback completo: " . $e->getMessage()
+            );
+
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'La actualización falló y se revirtió por completo (rollback). Detalle: ' . $e->getMessage(),
+            ], 500);
+        }
+
+        \App\Libraries\AuditLibrary::log(
+            (int)$actor->id, 'ACTUALIZAR_EMPLEADO_MASIVO_DINAMICO', 'empleados', '-',
+            "Actualizó {$actualizados} empleados, campos: " . implode(', ', array_keys($camposVistos)) .
+            " (" . count($detalle) . " con error)"
+        );
+
+        return $this->respond([
+            'status'       => 'ok',
+            'message'      => 'Actualización masiva procesada',
+            'total'        => count($empleadosArr),
+            'insertados'   => $actualizados, // 👈 se llama "insertados" para reusar el mismo contador del frontend
+            'duplicados'   => 0,
+            'errores'      => count($detalle),
+            'detalle'      => $detalle,       // 👈 NUEVO -- ya fluye al "Exportar errores" del frontend
+            'campos_actualizados' => array_keys($camposVistos),
+        ], 200);
     }
 
 

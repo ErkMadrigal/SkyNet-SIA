@@ -163,6 +163,7 @@ $routes->group('api', function ($routes) {
             $routes->post('(:num)/baja-accion', 'Api\V1\EmpleadosController::bajaAccion/$1', ['filter' => 'jwt:admin']);
 
             $routes->post('masivo-directo', 'Api\V1\EmpleadosController::masivoDirecto', ['filter' => ['jwt', 'importClave']]);
+            $routes->post('actualizar-masivo-dinamico', 'Api\V1\EmpleadosController::actualizarMasivoDinamico', ['filter' => ['jwt', 'importClave']]);
 
         });
 

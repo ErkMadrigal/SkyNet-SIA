@@ -32,7 +32,8 @@ namespace App\Libraries;
 class NominaFiscalLibrary
 {
     private const FACTOR_SDI             = 1.0493;
-    private const UMA_DIARIA             = 113.14;
+    // private const UMA_DIARIA             = 113.14;
+    private const UMA_DIARIA             = 117.14;
     private const EXENCION_PREVISION_SOC = 4.00;
 
         // ── Sueldo fiscal FIJO — validado contra Excel maestro ──────────────
