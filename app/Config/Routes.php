@@ -36,6 +36,9 @@ $routes->group('api', function ($routes) {
         // ── Audit Log ─────────────────────────────────
         $routes->get('audit-log', 'Api\V1\AuditController::index', ['filter' => 'jwt:admin']);
 
+        $routes->get('empleados/buscar-rapido', 'Api\V1\EmpleadosController::buscarRapido');
+
+
         /* ── NÓMINA ── */
         $routes->group('nomina', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->get('preview',            'Api\V1\NominaController::preview');
@@ -160,7 +163,6 @@ $routes->group('api', function ($routes) {
             $routes->post('(:num)/baja-accion', 'Api\V1\EmpleadosController::bajaAccion/$1', ['filter' => 'jwt:admin']);
 
             $routes->post('masivo-directo', 'Api\V1\EmpleadosController::masivoDirecto', ['filter' => ['jwt', 'importClave']]);
-
 
         });
 

@@ -420,7 +420,7 @@ class EmpleadosController extends ResourceController
 
         foreach ($empleadosArr as $emp) {
             $curp  = trim($emp['curp'] ?? '');
-            $nombre = trim($emp['nombre'] ?? '');
+            $nombre = $this->normalizarTexto($emp['nombre'] ?? '');
             if ($curp === '' || $nombre === '') continue;
 
             $esc = fn($v) => str_replace("'", "''", (string)($v ?? ''));
@@ -435,11 +435,17 @@ class EmpleadosController extends ResourceController
             $idTipoSangre  = is_numeric($emp['tipoSangre']   ?? null) ? (int)$emp['tipoSangre']   : 'NULL';
             $idParentesco  = is_numeric($emp['parentesco']   ?? null) ? (int)$emp['parentesco']   : 'NULL';
 
-            $valores[] = "('{$esc($nombre)}','{$esc($emp['paterno'] ?? '')}','{$esc($emp['materno'] ?? '')}'," .
+            $paterno = $this->normalizarTexto($emp['paterno'] ?? '');
+            $materno = $this->normalizarTexto($emp['materno'] ?? '');
+            $alergias = $this->normalizarTexto($emp['alergias'] ?? '') ?: 'N/A';
+            $nombreEmergencia = $this->normalizarTexto($emp['nombreEmergencia'] ?? '');
+
+            $valores[] = "('{$esc($nombre)}','{$esc($paterno)}','{$esc($materno)}'," .
+
                 "'{$esc($curp)}','{$esc($emp['rfc'] ?? '')}','{$esc($emp['nss'] ?? '')}'," .
-                "'{$esc($emp['cp'] ?? '')}','{$esc($emp['alergias'] ?? 'N/A')}'," .
+                "'{$esc($emp['cp'] ?? '')}','{$esc($alergias)}'," .
                 "{$idEscolaridad},{$idTipoSangre}," .
-                "'{$esc($emp['telefonoEmergencia'] ?? '')}','{$esc($emp['nombreEmergencia'] ?? '')}'," .
+                "'{$esc($emp['telefonoEmergencia'] ?? '')}','{$esc($nombreEmergencia)}'," .
                 "{$idParentesco},{$idTurno},{$idPuesto},{$idPeriocidad}," .
                 "'{$fecha}','{$fechaEfectiva}'," .
                 "'{$esc($emp['interbancaria'] ?? '')}'," .
@@ -496,6 +502,30 @@ class EmpleadosController extends ResourceController
             'errores'    => count($empleadosArr) - count($valores),
             'detalle'    => [],
         ], 201);
+    }
+
+
+    /**
+     * Normaliza texto: mayúsculas, sin acentos EXCEPTO la Ñ, colapsa espacios
+     * múltiples en uno solo, quita puntos/comas/símbolos raros.
+     * Deja las letras A-Z, Ñ, espacios entre palabras, y nada más.
+     */
+    private function normalizarTexto(?string $texto): string
+    {
+        if ($texto === null) return '';
+        $s = trim($texto);
+        $s = mb_strtoupper($s, 'UTF-8');
+
+        $s = str_replace('Ñ', '§', $s);
+        $s = strtr($s, [
+            'Á' => 'A', 'É' => 'E', 'Í' => 'I', 'Ó' => 'O', 'Ú' => 'U', 'Ü' => 'U',
+        ]);
+        $s = str_replace('§', 'Ñ', $s);
+
+        $s = preg_replace('/[^A-ZÑ ]/u', '', $s);
+        $s = preg_replace('/\s+/', ' ', $s);
+
+        return trim($s);
     }
 
     /* ═══════════════════════════════════════════════════════════════
@@ -809,5 +839,63 @@ class EmpleadosController extends ResourceController
         }
 
         return ['status' => 'ok', 'url' => rtrim($this->fotoBaseUrl, '/') . '/' . $nombre];
+    }
+
+    /**
+     * GET /api/v1/empleados/buscar-rapido?nombre=...&curp=...&rfc=...&nss=...
+     *
+     * Búsqueda pública -- SIN filtro jwt (ver ruta abajo).
+     * El resultado SOLO regresa no_empleado. No se exponen CURP, RFC, NSS,
+     * nombre, turno ni puesto en la respuesta -- aunque se usen como criterio
+     * de búsqueda, nunca se regresan en el output.
+     *
+     * Exige al menos 1 criterio de búsqueda no vacío.
+     * no_Empleado = e.id formateado a 6 dígitos con ceros a la izquierda.
+     */
+    public function buscarRapido(): mixed
+    {
+        $q = trim((string)($this->request->getVar('q') ?? ''));
+
+        if ($q === '') {
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Escribe un nombre, CURP, RFC o NSS para buscar',
+            ], 400);
+        }
+
+        $db = \Config\Database::connect();
+
+        // Usamos query() con bind params -- CONCAT_WS() como expresión cruda
+        // no funciona bien con el Query Builder (intenta poner backticks
+        // alrededor de la expresión completa como si fuera un nombre de columna).
+        $like = '%' . $q . '%';
+
+        $rows = $db->query("
+            SELECT e.id AS no_empleado_raw
+            FROM empleados e
+            WHERE e.is_deleted = 0
+            AND (
+                    e.nombre  LIKE ?
+                OR e.paterno LIKE ?
+                OR e.materno LIKE ?
+                OR e.curp    LIKE ?
+                OR e.rfc     LIKE ?
+                OR e.nss     LIKE ?
+                OR CONCAT_WS(' ', e.nombre, e.paterno, e.materno) LIKE ?
+                OR CONCAT_WS(' ', e.paterno, e.materno, e.nombre) LIKE ?
+            )
+            LIMIT 50
+        ", [$like, $like, $like, $like, $like, $like, $like, $like])->getResultArray();
+
+        $resultado = array_map(
+            fn($r) => ['no_empleado' => str_pad((string)$r['no_empleado_raw'], 6, '0', STR_PAD_LEFT)],
+            $rows
+        );
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => $resultado,
+            'total'  => count($resultado),
+        ]);
     }
 }
