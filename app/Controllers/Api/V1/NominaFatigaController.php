@@ -1176,16 +1176,11 @@ class NominaFatigaController extends ResourceController
 
         // ── Baja real (código B) ──────────────────────────────────────────
         if ($conteoBaja > 0) {
-            $sueldoPagado = max(0, round($sd * $diasTrabajados, 2));
-            $tiempoExtra  = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
-                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
-                        + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
-
             return array_merge([
-                'sueldo_base'      => $sueldoPeriodo, // 👈 ya no $sueldoBase crudo
-                'sueldo_semanal'   => round($sueldoPagado + $tiempoExtra, 2),
+                'sueldo_base'      => $sueldoPeriodo,
+                'sueldo_semanal'   => 0,      // 👈 ya no se paga ni el día D
                 'bono'             => 0,
-                'tiempo_extra'     => round($tiempoExtra, 2),
+                'tiempo_extra'     => 0,      // 👈 tampoco extras/dobletes
                 'descuento_faltas' => 0,
                 'es_baja'          => true,
                 'conteo_faltas'    => $conteoFaltas,
@@ -1194,10 +1189,11 @@ class NominaFatigaController extends ResourceController
                 'conteo_12e'       => $conteo12e,
                 'conteo_alta'      => $conteoAlta,
                 'conteo_baja'      => $conteoBaja,
-                'dias_pagados'     => $diasTrabajados,
+                'dias_pagados'     => 0,
                 'turno'            => $esTurno24 ? '24' : '12',
             ], $extraConteos);
         }
+
 
         // ── Más de 3 faltas REALES (F) = baja no avisada ───────────────────
         if ($conteoFaltas > 3) {
@@ -1267,6 +1263,35 @@ class NominaFatigaController extends ResourceController
             return array_merge([
                 'sueldo_base'      => $sueldoPeriodo,
                 'sueldo_semanal'   => round($sueldoPagado, 2),
+                'bono'             => 0,
+                'tiempo_extra'     => round($tiempoExtra, 2),
+                'descuento_faltas' => round($descuentoFaltas, 2),
+                'es_baja'          => false,
+                'conteo_faltas'    => $conteoFaltas,
+                'conteo_pss'       => $conteoPss,
+                'conteo_24e'       => $conteo24e,
+                'conteo_12e'       => $conteo12e,
+                'conteo_alta'      => $conteoAlta,
+                'conteo_baja'      => $conteoBaja,
+                'dias_pagados'     => $diasTrabajados,
+                'turno'            => $esTurno24 ? '24' : '12',
+            ], $extraConteos);
+        }
+
+        // ── Incapacidad (código I) presente, sin baja/+3faltas/PSS ─────────
+        if ($conteoIncapacidad > 0) {
+            $sueldoProrrateado = round($salarioDiarioCrudo * $diasTrabajados, 2);
+
+            $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
+            $tiempoExtra      = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
+                            + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
+                            + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
+
+            $sueldoPagado = max(0, round($sueldoProrrateado - $descuentoFaltas, 2));
+
+            return array_merge([
+                'sueldo_base'      => $sueldoPeriodo,
+                'sueldo_semanal'   => round($sueldoPagado + $tiempoExtra, 2),
                 'bono'             => 0,
                 'tiempo_extra'     => round($tiempoExtra, 2),
                 'descuento_faltas' => round($descuentoFaltas, 2),
@@ -1944,15 +1969,18 @@ class NominaFatigaController extends ResourceController
             $sueldoTabuladorBase = round($salarioDiarioParaVacaciones * 15, 2);
 
             // ── Incapacidad (código 'I') ───────────────────────────────────
+            // $diasIncapacidad = $calculo['conteo_incapacidad'] ?? 0;
+            // $incap = \App\Libraries\NominaFiscalLibrary::calcularIncapacidad($sueldoTabuladorBase, $diasIncapacidad);
+
+
+            // $descuentoIncapacidad = 0;
+            // if ($diasIncapacidad > 0) {
+            //     $baseParaDescuento = $calculo['sueldo_semanal'] + $calculo['bono'] + $calculo['tiempo_extra'];
+            //     $descuentoIncapacidad = round(($baseParaDescuento / 15) * $diasIncapacidad, 2);
+            // }
+
             $diasIncapacidad = $calculo['conteo_incapacidad'] ?? 0;
-            $incap = \App\Libraries\NominaFiscalLibrary::calcularIncapacidad($sueldoTabuladorBase, $diasIncapacidad);
-
-
             $descuentoIncapacidad = 0;
-            if ($diasIncapacidad > 0) {
-                $baseParaDescuento = $calculo['sueldo_semanal'] + $calculo['bono'] + $calculo['tiempo_extra'];
-                $descuentoIncapacidad = round(($baseParaDescuento / 15) * $diasIncapacidad, 2);
-            }
 
             // ── Vacaciones (código 'V') ──────────────────────────────────
             $conteoVacaciones = $calculo['conteo_vacaciones'] ?? 0;
@@ -1978,13 +2006,11 @@ class NominaFatigaController extends ResourceController
             $totalFinal = max(0, round(
                 $calculo['sueldo_semanal']
                 + $calculo['bono']
-                + $calculo['tiempo_extra']   
+                + $calculo['tiempo_extra']
                 + $montoFestivos
                 + $primaVacacional
                 + $adicional
                 - $calculo['descuento_faltas']
-                - $descuentoIncapacidad
-                + $incap['incapacidad_empresa']
                 - $otrosDescuentos
                 - $descFonacot - $descInfonavit - $descPension, 2
             ));
@@ -2019,8 +2045,24 @@ class NominaFatigaController extends ResourceController
 
             $sdFijo = ($sueldoFiscalBase - 4.0) / 15;
 
-            $sueldoNetoPagarFiscal = $totalFinal;
+            // NUEVO -- salvaguarda: si el fiscal calculado con los diasFiscales
+            // "normales" excedería lo que el empleado de verdad ganó, topa los
+            // días hacia abajo para que Neto Fiscal nunca sea mayor al pago real
+            // (evita IAS negativo, que no tiene sentido en la práctica).
+            if ($sdFijo > 0) {
+                if ($totalFinal <= 0) {
+                    $diasFiscales = 0; 
+                } else {
+                    $diasFiscalesMax = (int)floor($totalFinal / $sdFijo);
+                    if ($diasFiscalesMax < $diasFiscales) {
+                        $diasFiscales = $diasFiscalesMax;
+                    }
+                }
+            }
 
+            $sueldoNetoPagarFiscal = $tieneAltaBaja
+                ? round($sdFijo * $diasFiscales, 2)
+                : $totalFinal;
 
             $fiscal = \App\Libraries\NominaFiscalLibrary::calcular(
                 $sueldoFiscalBase,
@@ -2031,7 +2073,7 @@ class NominaFatigaController extends ResourceController
                 $descPension
             );
 
-            if ($calculo['es_baja'] ?? false) {
+            if (($calculo['es_baja'] ?? false) || $totalFinal <= 0) {
                 $fiscal['neto_fiscal']      = 0;
                 $fiscal['ias']              = 0;
                 $fiscal['total_dispersion'] = 0;
@@ -2045,6 +2087,7 @@ class NominaFatigaController extends ResourceController
                 'puesto'                => $empleado['puesto'] ?? null,
                 'conteo_faltas'         => $calculo['conteo_faltas'] ?? 0,
                 'conteo_pss'            => $calculo['conteo_pss'] ?? 0,
+                'conteo_baja'           => $calculo['conteo_baja'] ?? 0,
                 'conteo_8h_extra'       => $calculo['conteo_8e']  ?? 0, 
                 'sueldo_quincenal'      => $sueldoQuincenal,
                 'conteo_12h_extra'      => $calculo['conteo_12e'] ?? 0,
@@ -2055,7 +2098,7 @@ class NominaFatigaController extends ResourceController
                 'monto_festivos'        => round($montoFestivos, 2),
                 'monto_dobletes'        => 0,
                 'es_nuevo'              => $esNuevo ? 1 : 0,
-                'dias_pagados'          => $diasPagados,
+                'dias_pagados'          => $diasFiscales,
                 'sueldo_semanal'        => $calculo['sueldo_semanal'],
                 'tiempo_extra'          => $calculo['tiempo_extra'],
                 'descuento_faltas'      => $calculo['descuento_faltas'],
@@ -2063,11 +2106,11 @@ class NominaFatigaController extends ResourceController
                 'desc_fonacot'          => $descFonacot,
                 'desc_infonavit'        => $descInfonavit,
                 'desc_pension'          => $descPension,
-                'conteo_incapacidad'    => $diasIncapacidad,
-                'descuento_incapacidad' => $descuentoIncapacidad,
-                'incapacidad_100'       => $incap['incapacidad_100'],
-                'incapacidad_imss'      => $incap['incapacidad_imss'],
-                'incapacidad_empresa'   => $incap['incapacidad_empresa'],
+                'conteo_incapacidad'    => $diasIncapacidad,  
+                'descuento_incapacidad' => 0,
+                'incapacidad_100'       => 0,
+                'incapacidad_imss'      => 0,
+                'incapacidad_empresa'   => 0,
                 'conteo_vacaciones'     => $conteoVacaciones,
                 'prima_vacacional'      => $primaVacacional,
                 'total'                 => $totalFinal,
@@ -2303,7 +2346,9 @@ class NominaFatigaController extends ResourceController
 
 
         try {
-            $filasAsistencia = $this->extraerFilasAsistenciaDesdeSpreadsheet($spreadsheet);
+            $resultadoLectura = $this->extraerFilasAsistenciaDesdeSpreadsheet($spreadsheet);
+            $filasAsistencia  = $resultadoLectura['filas'];
+            $omitidasReporte  = $resultadoLectura['omitidas'];
         } catch (\Throwable $e) {
             @unlink($tmpPath);
             return $this->respond(['status' => 'error', 'message' => 'Error leyendo Asistencia: ' . $e->getMessage()], 422);
@@ -2437,6 +2482,7 @@ class NominaFatigaController extends ResourceController
                     'nombre_carga' => $nombreCarga,
                     'total'        => count($filasAsistencia),
                     'chunk_size'   => self::CHUNK_SIZE_DEFAULT,
+                    'omitidas'     => $omitidasReporte,   
                 ],
             ],
         ], 201);
@@ -2707,7 +2753,7 @@ class NominaFatigaController extends ResourceController
     private function extraerFilasAsistenciaDesdeSpreadsheet(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
     {
         $sheet = $this->buscarHojaPorNombre($spreadsheet, 'Asistencia');
-        if (!$sheet) return [];
+        if (!$sheet) return ['filas' => [], 'omitidas' => []];
 
         $headerRow = null;
         $maxColCheck = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
@@ -2717,7 +2763,7 @@ class NominaFatigaController extends ResourceController
                 if (strcasecmp($v, 'ID_Empleado') === 0) { $headerRow = $r; break 2; }
             }
         }
-        if ($headerRow === null) return [];
+        if ($headerRow === null) return ['filas' => [], 'omitidas' => []];
 
         $headers = [];
         for ($c = 1; $c <= $maxColCheck; $c++) {
@@ -2755,18 +2801,31 @@ class NominaFatigaController extends ResourceController
                 $diaCols[(int)$label] = $col;
             }
         }
-        // ksort($diaCols);
 
         $filas = [];
+        $omitidas = []; // 👈 NUEVO -- [fila, motivo, nombre]
         $leer  = fn($col, $r) => trim((string)($sheet->getCell([$col, $r])->getValue() ?? ''));
 
         for ($r = $headerRow + 1; $r <= $sheet->getHighestRow(); $r++) {
+            $nombreDeLaFila = $colNombre ? $leer($colNombre, $r) : '';
+
             $idEmpRaw = $sheet->getCell([$colIdEmp, $r])->getValue();
             if (is_string($idEmpRaw) && str_starts_with(trim($idEmpRaw), '=')) {
                 $idEmpRaw = $sheet->getCell([$colIdEmp, $r])->getOldCalculatedValue();
             }
-            if ($idEmpRaw === null || $idEmpRaw === '' || $idEmpRaw === ' ') continue;
-            if (!is_numeric(trim((string)$idEmpRaw))) continue;
+
+            // Fila completamente vacía (sin nombre ni id) -- se ignora sin reportar,
+            // es normal que el Excel tenga filas de relleno al final.
+            if ($idEmpRaw === null || $idEmpRaw === '' || $idEmpRaw === ' ') {
+                if ($nombreDeLaFila === '') continue; // vacía de verdad, no se reporta
+                $omitidas[] = ['fila' => $r, 'nombre' => $nombreDeLaFila, 'motivo' => 'ID_Empleado vacío'];
+                continue;
+            }
+
+            if (!is_numeric(trim((string)$idEmpRaw))) {
+                $omitidas[] = ['fila' => $r, 'nombre' => $nombreDeLaFila, 'motivo' => "ID_Empleado no es numérico ({$idEmpRaw})"];
+                continue;
+            }
 
             $idServRaw = $sheet->getCell([$colIdServ, $r])->getValue();
             if (is_string($idServRaw) && str_starts_with(trim($idServRaw), '=')) {
@@ -2780,7 +2839,7 @@ class NominaFatigaController extends ResourceController
             }
 
             $filas[] = [
-                'nombre'           => $leer($colNombre, $r),
+                'nombre'           => $nombreDeLaFila,
                 'id_empleado'      => (int)$idEmpRaw,
                 'servicio'         => $leer($colServicio, $r),
                 'id_servicio'      => (int)$idServRaw,
@@ -2824,7 +2883,7 @@ class NominaFatigaController extends ResourceController
             unset($fila);
         }
 
-        return $filas;
+        return ['filas' => $filas, 'omitidas' => $omitidas];
     }
 
     /**
