@@ -366,6 +366,9 @@ class EmpleadosController extends ResourceController
                 'parentesco'         => trim($emp['parentesco'] ?? ''),
                 'nombreEmergencia'   => trim($emp['nombreEmergencia'] ?? ''),
                 'telefonoEmergencia' => trim($emp['telefonoEmergencia'] ?? ''),
+                'modo_sueldo'        => in_array($emp['modo_sueldo'] ?? '', ['tabulador', 'salario'], true) ? $emp['modo_sueldo'] : 'tabulador',  // 👈 NUEVO
+                'salario_mensual'    => is_numeric($emp['salario_mensual'] ?? null) && (float)$emp['salario_mensual'] > 0 ? (float)$emp['salario_mensual'] : null,  // 👈 NUEVO
+    
                 'created_by'         => (int)$actor->id,
             ];
 
@@ -399,7 +402,7 @@ class EmpleadosController extends ResourceController
     }
 
 
-        public function masivoDirecto(): mixed
+    public function masivoDirecto(): mixed
     {
         @set_time_limit(0);
         @ini_set('memory_limit', '1024M');

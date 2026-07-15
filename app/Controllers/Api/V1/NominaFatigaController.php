@@ -399,10 +399,17 @@ class NominaFatigaController extends ResourceController
         }
 
         $db = \Config\Database::connect();
-        $detalle = $db->table('nomina_fatiga_detalle')
-            ->where('id_nomina', (int)$id)
-            ->orderBy('nombre_excel', 'ASC')
-            ->get()->getResultArray();
+
+        // 👇 Cambiado de Query Builder a query() con JOIN, para traer archivo_origen
+        $detalle = $db->query("
+            SELECT
+                nfd.*,
+                nc.archivo_original AS archivo_origen
+            FROM nomina_fatiga_detalle nfd
+            LEFT JOIN nomina_fatiga_cargas nc ON nc.id = nfd.id_carga
+            WHERE nfd.id_nomina = ?
+            ORDER BY nfd.nombre_excel ASC
+        ", [(int)$id])->getResultArray();
 
         return $this->respond(['status' => 'ok', 'data' => ['nomina' => $nomina, 'detalle' => $detalle]]);
     }
@@ -1104,25 +1111,31 @@ class NominaFatigaController extends ResourceController
      *   - Solo paga días trabajados, sin descuento
      */
     private function calcularDesdeAsistencia(array $dias, array $tabulador, int $diasPeriodo = 15, ?float $salarioDiarioOverride = null): array
-
     {
-        $sueldoBase = (float)$tabulador['sueldo'];
+        $sueldoBase = (float)$tabulador['sueldo']; // AHORA: valor MENSUAL del tabulador
         $bono       = (float)$tabulador['bono'];
 
-        $sd                 = $salarioDiarioOverride ?? (($sueldoBase - 4.0) / 15);
-        $salarioDiarioCrudo = $salarioDiarioOverride ?? round($sueldoBase / 15, 6);
+        // 👇 FIX: /30.4 en vez de /15 -- el tabulador guarda MENSUAL, no quincenal
+        $divisorMensual = ($diasPeriodo == 7) ? 30.4 : 30;
+        $salarioDiarioCrudo = $salarioDiarioOverride ?? round($sueldoBase / $divisorMensual, 6);
+        $sd                 = $salarioDiarioOverride ?? $salarioDiarioCrudo; // ya no se resta el -4 (ese ajuste era específico del cálculo fiscal fijo, no aplica aquí)
+
+        // 👇 NUEVO -- reconstruye el pago del periodo (quincenal=15 días o semanal=7 días)
+        // a partir del diario real, en vez de usar el sueldo mensual crudo directo.
+        $sueldoPeriodo = round($salarioDiarioCrudo * $diasPeriodo, 2);
 
         $diasArray = array_slice(array_values($dias), 0, $diasPeriodo);
-
 
         $conteoFaltas      = 0;
         $conteoPss         = 0;
         $conteo24e         = 0;
         $conteo12e         = 0;
+        $conteo8e          = 0;
         $conteoAlta        = 0;
         $conteoBaja        = 0;
         $conteo24          = 0;
         $conteo12          = 0;
+        $conteo8           = 0;
         $conteoDescanso    = 0;
         $conteoIncapacidad = 0;
         $conteoVacaciones  = 0;
@@ -1134,39 +1147,42 @@ class NominaFatigaController extends ResourceController
                 case 'PSS': $conteoPss++;         break;
                 case '24E': $conteo24e++;         break;
                 case '12E': $conteo12e++;         break;
+                case '8E':  $conteo8e++;          break;
                 case 'A':   $conteoAlta++;        break;
                 case 'B':   $conteoBaja++;        break;
                 case '24':  $conteo24++;          break;
                 case '12':  $conteo12++;          break;
+                case '8':   $conteo8++;           break;
                 case 'D':   $conteoDescanso++;    break;
                 case 'I':   $conteoIncapacidad++; break;
                 case 'V':   $conteoVacaciones++;  break;
             }
         }
 
-        $esTurno24 = $conteo24 >= $conteo12;
+        $esTurno24 = $conteo24 >= ($conteo12 + $conteo8);
         $factorDescuento = $esTurno24 ? 4 : 2;
         $FACTOR_24E = 2;
         $FACTOR_12E = 1;
+        $FACTOR_8E  = 1;
 
-        $diasTrabajados = $conteo24 + $conteo12 + $conteo24e + $conteo12e + $conteoDescanso;
-
-        // Solo se usa para reportar, NO para decidir la rama punitiva
-        $totalFaltas = $conteoFaltas + $conteoPss;
+        $diasTrabajados = $conteo24 + $conteo12 + $conteo8 + $conteo24e + $conteo12e + $conteo8e + $conteoDescanso;
 
         $extraConteos = [
             'conteo_incapacidad' => $conteoIncapacidad,
             'conteo_vacaciones'  => $conteoVacaciones,
+            'conteo_8e'          => $conteo8e,
+            'salario_diario'     => round($salarioDiarioCrudo, 6), // 👈 NUEVO -- fuente única para procesarChunk()
         ];
 
         // ── Baja real (código B) ──────────────────────────────────────────
         if ($conteoBaja > 0) {
             $sueldoPagado = max(0, round($sd * $diasTrabajados, 2));
             $tiempoExtra  = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
-                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
+                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
+                        + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
 
             return array_merge([
-                'sueldo_base'      => round($sueldoBase, 2),
+                'sueldo_base'      => $sueldoPeriodo, // 👈 ya no $sueldoBase crudo
                 'sueldo_semanal'   => round($sueldoPagado + $tiempoExtra, 2),
                 'bono'             => 0,
                 'tiempo_extra'     => round($tiempoExtra, 2),
@@ -1183,19 +1199,17 @@ class NominaFatigaController extends ResourceController
             ], $extraConteos);
         }
 
-        // ── Más de 3 faltas REALES (F) = baja no avisada ─────────────
-        // ⚠️ FIX: solo cuenta $conteoFaltas (F real), NUNCA $conteoPss.
-        // PSS es permiso autorizado — por muchos días que tenga, jamás
-        // debe activar la rama punitiva de "baja no avisada".
+        // ── Más de 3 faltas REALES (F) = baja no avisada ───────────────────
         if ($conteoFaltas > 3) {
             $sueldoDiasTrabajados = round($sd * $diasTrabajados, 2);
             $descuentoTotalFaltas = $sd * $factorDescuento * $conteoFaltas;
             $sueldoPagado         = max(0, round($sueldoDiasTrabajados - $descuentoTotalFaltas, 2));
             $tiempoExtra          = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
-                                + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
+                                + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
+                                + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
 
             return array_merge([
-                'sueldo_base'      => round($sueldoBase, 2),
+                'sueldo_base'      => $sueldoPeriodo,
                 'sueldo_semanal'   => round($sueldoPagado + $tiempoExtra, 2),
                 'bono'             => 0,
                 'tiempo_extra'     => round($tiempoExtra, 2),
@@ -1212,16 +1226,46 @@ class NominaFatigaController extends ResourceController
             ], $extraConteos);
         }
 
-        // ── PSS presente (con o sin 0-3 F reales) ──────────────────────
+        // ── Alta (código A) presente, sin baja ni +3 faltas ────────────────
+        if ($conteoAlta > 0 && $conteoBaja === 0 && $conteoFaltas <= 3) {
+            $sueldoProrrateado = round($salarioDiarioCrudo * $diasTrabajados, 2); // ej. 166.67 × 10 = 1,666.67
+
+            $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
+            $tiempoExtra      = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
+                            + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
+                            + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
+
+            $sueldoPagado = max(0, round($sueldoProrrateado - $descuentoFaltas, 2));
+
+            return array_merge([
+                'sueldo_base'      => $sueldoPeriodo,
+                'sueldo_semanal'   => round($sueldoPagado + $tiempoExtra, 2),
+                'bono'             => 0,
+                'tiempo_extra'     => round($tiempoExtra, 2),
+                'descuento_faltas' => round($descuentoFaltas, 2),
+                'es_baja'          => false,
+                'conteo_faltas'    => $conteoFaltas,
+                'conteo_pss'       => $conteoPss,
+                'conteo_24e'       => $conteo24e,
+                'conteo_12e'       => $conteo12e,
+                'conteo_alta'      => $conteoAlta,
+                'conteo_baja'      => $conteoBaja,
+                'dias_pagados'     => $diasTrabajados,
+                'turno'            => $esTurno24 ? '24' : '12',
+            ], $extraConteos);
+        }
+
+        // ── PSS presente (con o sin 0-3 F reales) ──────────────────────────
         if ($conteoPss > 0) {
             $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
             $tiempoExtra      = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
-                            + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
+                            + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
+                            + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
 
             $sueldoPagado = max(0, round($sd * $diasTrabajados - $descuentoFaltas, 2));
 
             return array_merge([
-                'sueldo_base'      => round($sueldoBase, 2),
+                'sueldo_base'      => $sueldoPeriodo,
                 'sueldo_semanal'   => round($sueldoPagado, 2),
                 'bono'             => 0,
                 'tiempo_extra'     => round($tiempoExtra, 2),
@@ -1238,18 +1282,16 @@ class NominaFatigaController extends ResourceController
             ], $extraConteos);
         }
 
-        // ── Normal: 0 a 3 faltas reales, sin PSS ──────────────────────────
+        // ── Normal: 0 a 3 faltas reales, sin PSS ───────────────────────────
         $bonoAplicado    = ($conteoFaltas === 0) ? $bono : 0.0;
         $descuentoFaltas = $sd * $factorDescuento * $conteoFaltas;
         $tiempoExtra     = $salarioDiarioCrudo * $FACTOR_24E * $conteo24e
-                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e;
-
-        $sueldoPagado = max(0, round($sueldoBase + $bonoAplicado + $tiempoExtra
-                        - $descuentoFaltas, 2));
+                        + $salarioDiarioCrudo * $FACTOR_12E * $conteo12e
+                        + $salarioDiarioCrudo * $FACTOR_8E  * $conteo8e;
 
         return array_merge([
-            'sueldo_base'      => round($sueldoBase, 2),
-            'sueldo_semanal'   => round($sueldoBase, 2),
+            'sueldo_base'      => $sueldoPeriodo,   // 👈 ya no $sueldoBase crudo (mensual)
+            'sueldo_semanal'   => $sueldoPeriodo,   // 👈 ya no $sueldoBase crudo (mensual)
             'bono'             => round($bonoAplicado, 2),
             'tiempo_extra'     => round($tiempoExtra, 2),
             'descuento_faltas' => round($descuentoFaltas, 2),
@@ -1303,188 +1345,193 @@ class NominaFatigaController extends ResourceController
      */
     public function exportarXlsx($id = null): mixed
     {
-    $idNomina = (int)$id;
-    $db = \Config\Database::connect();
+        $idNomina = (int)$id;
+        $db = \Config\Database::connect();
 
-    $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
-    if (!$nomina) {
-        return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
-    }
-
-    // ── Trae el detalle + datos de identificación del empleado + servicio ────
-    $rows = $db->query("
-        SELECT
-            nfd.*,
-            e.curp, e.rfc, e.CP_fiscal, e.nss, e.fecha_ingreso,
-            e.paterno, e.materno, e.nombre,
-            mt.valor AS turno_valor,
-            mp.valor AS puesto_valor,
-            e.clave_interbancaria,
-            mb.valor AS banco_valor,
-            srv.servicio      AS servicio_nombre,
-            srv.elementos      AS servicio_elementos,
-            srv.ubicacion      AS servicio_ubicacion,
-            cli.nombre_corto   AS cliente_nombre,
-            emp.empresa        AS empresa_nombre,
-            zon.zona           AS zona_nombre
-        FROM nomina_fatiga_detalle nfd
-        LEFT JOIN empleados e      ON e.id = nfd.id_empleado
-        LEFT JOIN multicatalogo mt ON e.id_turno = mt.id
-        LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
-        LEFT JOIN multicatalogo mb
-            ON mb.id_catalogo = 15
-        AND mb.descripcion = LEFT(e.clave_interbancaria, 3)
-        LEFT JOIN servicios srv ON srv.id = nfd.id_servicio_raw
-        LEFT JOIN clientes  cli ON cli.id = srv.id_cliente
-        LEFT JOIN empresas  emp ON emp.id = srv.id_empresa
-        LEFT JOIN zonas     zon ON zon.id = srv.id_zona
-        WHERE nfd.id_nomina = ?
-        ORDER BY nfd.nombre_excel ASC
-    ", [$idNomina])->getResultArray();
-
-    if (empty($rows)) {
-        return $this->respond(['status' => 'error', 'message' => 'La nómina no tiene detalle'], 422);
-    }
-
-    // ── Orden canónico de los días del calendario (cronológico) ───────
-    // Se toma del primer registro con calendario, respetando el orden
-    // real de inserción del JSON (ya corregido, sin ksort).
-    $diasCanonicos = [];
-    foreach ($rows as $r) {
-        $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
-        if (!empty($cal)) {
-            $diasCanonicos = array_keys($cal);
-            break;
+        $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
+        if (!$nomina) {
+            return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
         }
-    }
 
-    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $rows = $db->query("
+            SELECT
+                nfd.*,
+                e.curp, e.rfc, e.CP_fiscal, e.nss, e.fecha_ingreso,
+                e.paterno, e.materno, e.nombre,
+                mt.valor AS turno_valor,
+                mp.valor AS puesto_valor,
+                e.clave_interbancaria,
+                mb.valor AS banco_valor,
+                srv.servicio      AS servicio_nombre,
+                srv.elementos      AS servicio_elementos,
+                srv.ubicacion      AS servicio_ubicacion,
+                cli.nombre_corto   AS cliente_nombre,
+                emp.empresa        AS empresa_nombre,
+                zon.zona           AS zona_nombre,
+                nc.archivo_original AS archivo_origen
+            FROM nomina_fatiga_detalle nfd
+            LEFT JOIN empleados e      ON e.id = nfd.id_empleado
+            LEFT JOIN multicatalogo mt ON e.id_turno = mt.id
+            LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+            LEFT JOIN multicatalogo mb
+                ON mb.id_catalogo = 15
+            AND mb.descripcion = LEFT(e.clave_interbancaria, 3)
+            LEFT JOIN servicios srv ON srv.id = nfd.id_servicio_raw
+            LEFT JOIN clientes  cli ON cli.id = srv.id_cliente
+            LEFT JOIN empresas  emp ON emp.id = srv.id_empresa
+            LEFT JOIN zonas     zon ON zon.id = srv.id_zona
+            LEFT JOIN nomina_fatiga_cargas nc ON nc.id = nfd.id_carga
+            WHERE nfd.id_nomina = ?
+            ORDER BY nfd.nombre_excel ASC
+        ", [$idNomina])->getResultArray();
 
-    $headersFijos = [
-        'CURP', 'RFC', 'CP Fiscal', 'NSS', 'Fecha Ingreso',
-        'Paterno', 'Materno', 'Nombre', 'Turno', 'Puesto',
-        'Clabe Interbancaria', 'Banco',
-        'Servicio', 'Elementos', 'Ubicación', 'Cliente', 'Empresa', 'Zona', // ← nuevas
-    ];
-    $headersDias = array_map(fn($d) => (string)$d, $diasCanonicos);
-
-    // ═══ HOJA 1 — PRE-NÓMINA ═══
-    $sheet1 = $spreadsheet->getActiveSheet();
-    $sheet1->setTitle('Pre-nomina');
-
-    $headersCalculo1 = [
-        'Zona', '★', 'Sueldo', 'Extra', 'Adicional', 'Fest/Dob',
-        'Faltas', 'FONACOT', 'INFONAVIT', 'Pensión', 'Otros',
-        'Neto pagar', 'Bono',
-    ];
-    $headers1 = array_merge($headersFijos, $headersDias, $headersCalculo1);
-    $sheet1->fromArray($headers1, null, 'A1');
-    $ultimaColLetra1 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers1));
-    $sheet1->getStyle("A1:{$ultimaColLetra1}1")->getFont()->setBold(true);
-
-    $rowNum = 2;
-    foreach ($rows as $r) {
-        $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
-        $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
-        $festDob  = round((float)($r['monto_festivos'] ?? 0) + (float)($r['monto_dobletes'] ?? 0), 2);
-
-        $fila = array_merge([
-            $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
-            $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
-            $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
-            $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
-            $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
-            $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
-        ], $diasVals, [
-            $r['zona'] ?? '',
-            ($r['es_nuevo'] ?? 0) == 1 ? 1 : 0,
-            (float)($r['sueldo_semanal'] ?? 0),
-            (float)($r['tiempo_extra'] ?? 0),
-            (float)($r['adicional'] ?? 0),
-            $festDob,
-            (float)($r['descuento_faltas'] ?? 0),
-            (float)($r['desc_fonacot'] ?? 0),
-            (float)($r['desc_infonavit'] ?? 0),
-            (float)($r['desc_pension'] ?? 0),
-            (float)($r['otros_descuentos'] ?? 0),
-            (float)($r['total'] ?? 0),
-            (float)($r['bono'] ?? 0),   
-        ]);
-
-        $sheet1->fromArray($fila, null, 'A' . $rowNum);
-        $rowNum++;
-    }
-
-    // ═══ HOJA 2 — NÓMINA FISCAL ═══
-    $sheet2 = $spreadsheet->createSheet();
-    $sheet2->setTitle('Nomina Fiscal');
-
-    $headersCalculo2 = [
-        'Días Lab.', 'SD', 'SDI', 'Ingreso Q', 'ISR antes Subs.',
-        'IMSS', 'INFONAVIT', 'FONACOT', 'Pensión', 'Subs. Empleo',
-        'ISR neto', 'Neto Fiscal', 'IAS', 'Total Disp.',
-    ];
-    $headers2 = array_merge($headersFijos, $headersDias, $headersCalculo2);
-    $sheet2->fromArray($headers2, null, 'A1');
-    $ultimaColLetra2 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers2));
-    $sheet2->getStyle("A1:{$ultimaColLetra2}1")->getFont()->setBold(true);
-
-    $rowNum = 2;
-    foreach ($rows as $r) {
-        $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
-        $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
-
-        $fila = array_merge([
-            $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
-            $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
-            $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
-            $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
-            $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
-            $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
-        ], $diasVals, [
-            (int)($r['dias_pagados'] ?? 0),
-            (float)($r['sd'] ?? 0),
-            (float)($r['sdi'] ?? 0),
-            (float)($r['ingreso_quincenal'] ?? 0),
-            (float)($r['isr_bruto'] ?? 0),
-            (float)($r['imss_obrero'] ?? 0),
-            (float)($r['desc_infonavit'] ?? 0),
-            (float)($r['desc_fonacot'] ?? 0),
-            (float)($r['desc_pension'] ?? 0),
-            (float)($r['subsidio_empleo'] ?? 0),
-            (float)($r['isr_neto'] ?? 0),
-            (float)($r['neto_fiscal'] ?? 0),
-            (float)($r['ias'] ?? 0),
-            (float)($r['total_dispersion'] ?? $r['total'] ?? 0),
-        ]);
-
-        $sheet2->fromArray($fila, null, 'A' . $rowNum);
-        $rowNum++;
-    }
-
-    $spreadsheet->setActiveSheetIndex(0);
-
-    // ── Autoajustar ancho de columnas en ambas hojas ─────────────────
-    foreach ([$sheet1, $sheet2] as $sh) {
-        $colIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sh->getHighestColumn());
-        for ($c = 1; $c <= $colIndex; $c++) {
-            $sh->getColumnDimensionByColumn($c)->setAutoSize(true);
+        if (empty($rows)) {
+            return $this->respond(['status' => 'error', 'message' => 'La nómina no tiene detalle'], 422);
         }
-    }
 
-    $nombreArchivo = 'nomina_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $nomina['nombre']) . '_' . date('Ymd_His') . '.xlsx';
-    $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+        $diasCanonicos = [];
+        foreach ($rows as $r) {
+            $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
+            if (!empty($cal)) {
+                $diasCanonicos = array_keys($cal);
+                break;
+            }
+        }
 
-    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
-    $writer->save($tmpPath);
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
 
-    $content = file_get_contents($tmpPath);
-    @unlink($tmpPath);
+        $headersFijos = [
+            'CURP', 'RFC', 'CP Fiscal', 'NSS', 'Fecha Ingreso',
+            'Paterno', 'Materno', 'Nombre', 'Turno', 'Puesto',
+            'Clabe Interbancaria', 'Banco',
+            'Servicio', 'Elementos', 'Ubicación', 'Cliente', 'Empresa', 'Zona',
+        ];
+        $headersDias = array_map(fn($d) => (string)$d, $diasCanonicos);
 
-    return $this->response
-        ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
-        ->setBody($content);
+        // ═══ HOJA 1 — PRE-NÓMINA ═══
+        $sheet1 = $spreadsheet->getActiveSheet();
+        $sheet1->setTitle('Pre-nomina');
+
+        $headersCalculo1 = [
+            'Zona', '★', 'Sueldo', 'Sueldo Quincenal', 'Extra', 'Adicional', 'Fest/Dob',
+            'Faltas', 'FONACOT', 'INFONAVIT', 'Pensión', 'Otros',
+            'Neto pagar', 'Bono',
+            'Comentarios', 'Archivo Origen', // 👈 NUEVO
+        ];
+        $headers1 = array_merge($headersFijos, $headersDias, $headersCalculo1);
+        $sheet1->fromArray($headers1, null, 'A1');
+        $ultimaColLetra1 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers1));
+        $sheet1->getStyle("A1:{$ultimaColLetra1}1")->getFont()->setBold(true);
+
+        $rowNum = 2;
+        foreach ($rows as $r) {
+            $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
+            $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
+            $festDob  = round((float)($r['monto_festivos'] ?? 0) + (float)($r['monto_dobletes'] ?? 0), 2);
+
+            $fila = array_merge([
+                $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
+                $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
+                $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
+                $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
+                $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
+                $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
+            ], $diasVals, [
+                $r['zona'] ?? '',
+                ($r['es_nuevo'] ?? 0) == 1 ? 1 : 0,
+                (float)($r['sueldo_semanal'] ?? 0),
+                (float)($r['sueldo_quincenal'] ?? 0),
+                (float)($r['tiempo_extra'] ?? 0),
+                (float)($r['adicional'] ?? 0),
+                $festDob,
+                (float)($r['descuento_faltas'] ?? 0),
+                (float)($r['desc_fonacot'] ?? 0),
+                (float)($r['desc_infonavit'] ?? 0),
+                (float)($r['desc_pension'] ?? 0),
+                (float)($r['otros_descuentos'] ?? 0),
+                (float)($r['total'] ?? 0),
+                (float)($r['bono'] ?? 0),
+                $r['comentarios'] ?? '',       // 👈 NUEVO
+                $r['archivo_origen'] ?? '',    // 👈 NUEVO
+            ]);
+
+            $sheet1->fromArray($fila, null, 'A' . $rowNum);
+            $rowNum++;
+        }
+
+        // ═══ HOJA 2 — NÓMINA FISCAL ═══
+        $sheet2 = $spreadsheet->createSheet();
+        $sheet2->setTitle('Nomina Fiscal');
+
+        $headersCalculo2 = [
+            'Días Lab.', 'Sueldo Quincenal', 'SD', 'SDI', 'Ingreso Q', 'ISR antes Subs.',
+            'IMSS', 'INFONAVIT', 'FONACOT', 'Pensión', 'Subs. Empleo',
+            'ISR neto', 'Neto Fiscal', 'IAS', 'Total Disp.',
+            'Comentarios', 'Archivo Origen', // 👈 NUEVO
+        ];
+        $headers2 = array_merge($headersFijos, $headersDias, $headersCalculo2);
+        $sheet2->fromArray($headers2, null, 'A1');
+        $ultimaColLetra2 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers2));
+        $sheet2->getStyle("A1:{$ultimaColLetra2}1")->getFont()->setBold(true);
+
+        $rowNum = 2;
+        foreach ($rows as $r) {
+            $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
+            $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
+
+            $fila = array_merge([
+                $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
+                $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
+                $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
+                $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
+                $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
+                $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
+            ], $diasVals, [
+                (int)($r['dias_pagados'] ?? 0),
+                (float)($r['sueldo_quincenal'] ?? 0),
+                (float)($r['sd'] ?? 0),
+                (float)($r['sdi'] ?? 0),
+                (float)($r['ingreso_quincenal'] ?? 0),
+                (float)($r['isr_bruto'] ?? 0),
+                (float)($r['imss_obrero'] ?? 0),
+                (float)($r['desc_infonavit'] ?? 0),
+                (float)($r['desc_fonacot'] ?? 0),
+                (float)($r['desc_pension'] ?? 0),
+                (float)($r['subsidio_empleo'] ?? 0),
+                (float)($r['isr_neto'] ?? 0),
+                (float)($r['neto_fiscal'] ?? 0),
+                (float)($r['ias'] ?? 0),
+                (float)($r['total_dispersion'] ?? $r['total'] ?? 0),
+                $r['comentarios'] ?? '',       // 👈 NUEVO
+                $r['archivo_origen'] ?? '',    // 👈 NUEVO
+            ]);
+
+            $sheet2->fromArray($fila, null, 'A' . $rowNum);
+            $rowNum++;
+        }
+
+        $spreadsheet->setActiveSheetIndex(0);
+
+        foreach ([$sheet1, $sheet2] as $sh) {
+            $colIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sh->getHighestColumn());
+            for ($c = 1; $c <= $colIndex; $c++) {
+                $sh->getColumnDimensionByColumn($c)->setAutoSize(true);
+            }
+        }
+
+        $nombreArchivo = 'nomina_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $nomina['nombre']) . '_' . date('Ymd_His') . '.xlsx';
+        $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer->save($tmpPath);
+
+        $content = file_get_contents($tmpPath);
+        @unlink($tmpPath);
+
+        return $this->response
+            ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+            ->setBody($content);
     }
 
     public function iniciarAsistencia(): mixed
@@ -1584,7 +1631,7 @@ class NominaFatigaController extends ResourceController
         }
 
         // ── Crear la carga (el "cachito" que se está subiendo ahora) ──────
-        $idCarga = $db->table('nomina_fatiga_cargas')->insert([
+        $db->table('nomina_fatiga_cargas')->insert([
             'id_nomina'        => $idNomina,
             'nombre_carga'     => $nombreCarga,
             'id_zona'          => $idZonaCarga,
@@ -1596,6 +1643,12 @@ class NominaFatigaController extends ResourceController
             'created_by'       => (int)$actor->id,
             'created_at'       => date('Y-m-d H:i:s'),
         ], true);
+        $idCarga = $db->insertID();
+
+        if (!$idCarga) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo crear el registro de carga'], 500);
+        }
+
 
         // ── Insertar las filas crudas, etiquetadas con id_carga ────────────
         $batch = [];
@@ -1811,7 +1864,8 @@ class NominaFatigaController extends ResourceController
 
             if ($empleado) {
                 if (($empleado['modo_sueldo'] ?? 'tabulador') === 'salario' && (float)($empleado['salario_mensual'] ?? 0) > 0) {
-                    $salarioDiarioReal = round((float)$empleado['salario_mensual'] / 30.4, 6);
+                    $divisorMensual    = ($diasPeriodo == 7) ? 30.4 : 30;
+                    $salarioDiarioReal = round((float)$empleado['salario_mensual'] / $divisorMensual, 6);
                     $sueldoDelPeriodo  = round($salarioDiarioReal * $diasPeriodo, 2);
 
                     $tabulador = [
@@ -1825,8 +1879,32 @@ class NominaFatigaController extends ResourceController
                     $tabulador = $tabuladorPorPar[$key] ?? null;
                 }
 
+                $sueldoQuincenal = null; 
+
                 if ($tabulador) {
                     $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador, $diasPeriodo, $salarioDiarioReal);
+
+                    // Auto-fill: si el empleado NO tiene salario_mensual capturado (opera
+                    // en modo tabulador), calcula y guarda el equivalente mensual como
+                    // referencia, sin cambiar su modo_sueldo.
+                    if ((float)($empleado['salario_mensual'] ?? 0) <= 0) {
+                        $salarioDiarioTab = (float)$tabulador['sueldo'] / $diasPeriodo;
+                        $salarioMensualEquivalente = round($salarioDiarioTab * 30.4, 2);
+
+                        $db->table('empleados')->where('id', $empleado['id'])->update([
+                            'salario_mensual' => $salarioMensualEquivalente,
+                        ]);
+                    }
+
+                    // Sueldo Quincenal (o del periodo real, según periodicidad) para mostrar
+                    if ($empleado) {
+                        $divisorMensual = ($diasPeriodo == 7) ? 30.4 : 30;
+                        if (($empleado['modo_sueldo'] ?? 'tabulador') === 'salario' && (float)($empleado['salario_mensual'] ?? 0) > 0) {
+                            $sueldoQuincenal = round(((float)$empleado['salario_mensual'] / $divisorMensual) * $diasPeriodo, 2);
+                        } else {
+                            $sueldoQuincenal = round(((float)$tabulador['sueldo'] / $divisorMensual) * $diasPeriodo, 2);
+                        }
+                    }
                 } else {
                     $sinTabulador++;
                 }
@@ -1849,11 +1927,11 @@ class NominaFatigaController extends ResourceController
             $montoFestivos  = $conteoFestivos * $salarioDiario;
 
             // ── Dobletes ─────────────────────────────────────────────────
-            $turnoEmp = $empleado ? ($empleado['id_turno'] ?? '24') : '24';
-            $turnoStr = (str_contains((string)$turnoEmp, '12')) ? '12' : '24';
-            $dobletes = \App\Libraries\FestivosLibrary::detectarDobletes(
-                $diasArr, $turnoStr, $salarioDiario
-            );
+            // $turnoEmp = $empleado ? ($empleado['id_turno'] ?? '24') : '24';
+            // $turnoStr = (str_contains((string)$turnoEmp, '12')) ? '12' : '24';
+            // $dobletes = \App\Libraries\FestivosLibrary::detectarDobletes(
+            //     $diasArr, $turnoStr, $salarioDiario
+            // );
 
             // ── ¿Es empleado nuevo en este periodo? ──────────────────────
             $esNuevo = in_array('A', array_map('strtoupper', array_values($diasArr)));
@@ -1862,12 +1940,8 @@ class NominaFatigaController extends ResourceController
             $otrosDescuentos = (float)$det['otros_descuentos'];
 
             // ── Sueldo tabulador base (una sola vez) ──────────────────────
-            $sueldoTabuladorBase = $salarioDiarioReal ? round($salarioDiarioReal * 15, 2) : (float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750);
-
-            // Para prima vacacional: la librería ya NO divide entre 15 internamente,
-            // así que aquí SÍ le pasamos el salario diario real directo, sin reconstruir.
-            $salarioDiarioParaVacaciones = $salarioDiarioReal
-                ?? round((float)($tabulador['sueldo'] ?? $calculo['sueldo_base'] ?? 4750) / 15, 6);
+            $salarioDiarioParaVacaciones = $calculo['salario_diario'] ?? round(4750 / 30.4, 6);
+            $sueldoTabuladorBase = round($salarioDiarioParaVacaciones * 15, 2);
 
             // ── Incapacidad (código 'I') ───────────────────────────────────
             $diasIncapacidad = $calculo['conteo_incapacidad'] ?? 0;
@@ -1886,12 +1960,26 @@ class NominaFatigaController extends ResourceController
 
 
             // ── Total final ──────────────────────────────────────────────
+            // $totalFinal = max(0, round(
+            //     $calculo['sueldo_semanal']
+            //     + $calculo['bono']
+            //     + $calculo['tiempo_extra']
+            //     + $montoFestivos
+            //     + $dobletes['monto_extra']
+            //     + $primaVacacional
+            //     + $adicional
+            //     - $calculo['descuento_faltas']
+            //     - $descuentoIncapacidad
+            //     + $incap['incapacidad_empresa']
+            //     - $otrosDescuentos
+            //     - $descFonacot - $descInfonavit - $descPension, 2
+            // ));
+
             $totalFinal = max(0, round(
                 $calculo['sueldo_semanal']
                 + $calculo['bono']
-                + $calculo['tiempo_extra']
+                + $calculo['tiempo_extra']   
                 + $montoFestivos
-                + $dobletes['monto_extra']
                 + $primaVacacional
                 + $adicional
                 - $calculo['descuento_faltas']
@@ -1931,9 +2019,8 @@ class NominaFatigaController extends ResourceController
 
             $sdFijo = ($sueldoFiscalBase - 4.0) / 15;
 
-            $sueldoNetoPagarFiscal = $tieneAltaBaja
-                ? round($sdFijo * $diasFiscales, 2)
-                : $totalFinal;
+            $sueldoNetoPagarFiscal = $totalFinal;
+
 
             $fiscal = \App\Libraries\NominaFiscalLibrary::calcular(
                 $sueldoFiscalBase,
@@ -1944,6 +2031,12 @@ class NominaFatigaController extends ResourceController
                 $descPension
             );
 
+            if ($calculo['es_baja'] ?? false) {
+                $fiscal['neto_fiscal']      = 0;
+                $fiscal['ias']              = 0;
+                $fiscal['total_dispersion'] = 0;
+            }
+
             // ── Actualizar detalle de nómina con todos los campos ────────
             // ── Actualizar detalle de nómina con todos los campos ────────
             $db->table('nomina_fatiga_detalle')->where('id', $det['id'])->update([
@@ -1952,12 +2045,15 @@ class NominaFatigaController extends ResourceController
                 'puesto'                => $empleado['puesto'] ?? null,
                 'conteo_faltas'         => $calculo['conteo_faltas'] ?? 0,
                 'conteo_pss'            => $calculo['conteo_pss'] ?? 0,
+                'conteo_8h_extra'       => $calculo['conteo_8e']  ?? 0, 
+                'sueldo_quincenal'      => $sueldoQuincenal,
                 'conteo_12h_extra'      => $calculo['conteo_12e'] ?? 0,
                 'conteo_24h_extra'      => $calculo['conteo_24e'] ?? 0,
                 'conteo_festivos'       => $conteoFestivos,
-                'conteo_dobletes'       => $dobletes['count'],
+                'conteo_dobletes'       => $calculo['conteo_24e'] + $calculo['conteo_12e'] + ($calculo['conteo_8e'] ?? 0),
+
                 'monto_festivos'        => round($montoFestivos, 2),
-                'monto_dobletes'        => $dobletes['monto_extra'],
+                'monto_dobletes'        => 0,
                 'es_nuevo'              => $esNuevo ? 1 : 0,
                 'dias_pagados'          => $diasPagados,
                 'sueldo_semanal'        => $calculo['sueldo_semanal'],
@@ -2205,6 +2301,7 @@ class NominaFatigaController extends ResourceController
         $resultadoAltas = $this->procesarHojaAltas($spreadsheet, $actor);
         $resultadoBajas = $this->procesarHojaBajas($spreadsheet, $actor);
 
+
         try {
             $filasAsistencia = $this->extraerFilasAsistenciaDesdeSpreadsheet($spreadsheet);
         } catch (\Throwable $e) {
@@ -2346,7 +2443,14 @@ class NominaFatigaController extends ResourceController
     }
     
 
-    /* ── Procesa hoja "Altas" → INSERT IGNORE en empleados ─────── */
+    /**
+     * procesarHojaAltas() -- versión con soporte para columna 'salario_mensual'.
+     * Detecta esa columna por HEADER (fila 1), no por posición fija -- así
+     * plantillas viejas sin esa columna siguen funcionando (todos quedan en
+     * modo_sueldo='tabulador').
+     *
+     * Reemplaza el método completo por este.
+     */
     private function procesarHojaAltas(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet, object $actor): array
     {
         $sheet = $spreadsheet->getSheetByName('Altas');
@@ -2358,8 +2462,6 @@ class NominaFatigaController extends ResourceController
             '127' => 1255, '137' => 1265, '145' => 1271,
         ];
 
-        // Lee una celda; si el valor crudo es una fórmula (empieza con "="),
-        // usa el valor cacheado del último guardado en Excel (igual que en Asistencia).
         $leer = function (int $col, int $row) use ($sheet) {
             $v = $sheet->getCell([$col, $row])->getValue();
             if (is_string($v) && str_starts_with(trim($v), '=')) {
@@ -2368,38 +2470,45 @@ class NominaFatigaController extends ResourceController
             return $v;
         };
 
-        $db = \Config\Database::connect();
-        $batch = [];
-        $procesadas = 0;
-        $omitidas = 0;
+        $colSalarioMensual = null;
+        $maxCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
+        for ($c = 1; $c <= $maxCol; $c++) {
+            $header = trim((string)($sheet->getCell([$c, 1])->getValue() ?? ''));
+            if (strcasecmp($header, 'salario_mensual') === 0) {
+                $colSalarioMensual = $c;
+                break;
+            }
+        }
 
+        $db = \Config\Database::connect();
+
+        // ── PASO 1: lee TODAS las filas a memoria ──────────────────────────
+        $filasLeidas = [];
         for ($r = 2; $r <= $sheet->getHighestRow(); $r++) {
             $nombre = trim((string)($leer(1, $r) ?? ''));
             $curp   = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', (string)($leer(4, $r) ?? '')));
 
-            if (!$nombre || !$curp) { $omitidas++; continue; }
+            if (!$nombre || !$curp) continue;
 
             $clabe = preg_replace('/\D/', '', (string)($leer(24, $r) ?? ''));
             $codBanco = substr($clabe, 0, 3);
             $idBanco = $BANCO_MAP[$codBanco] ?? null;
 
-            // Fecha_Alta (col 23) — blindado contra valores corruptos
             $fechaRaw = $leer(23, $r);
-            $fecha = '2026-01-01';
+            $fecha = null;
             if ($fechaRaw instanceof \DateTime) {
                 $fecha = $fechaRaw->format('Y-m-d');
             } elseif ($fechaRaw && is_numeric($fechaRaw) && $fechaRaw > 0 && $fechaRaw < 60000) {
                 try {
                     $fecha = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject($fechaRaw)->format('Y-m-d');
                 } catch (\Throwable $e) {
-                    $fecha = '2026-01-01';
+                    $fecha = null;
                 }
             } elseif (is_string($fechaRaw) && trim($fechaRaw) !== '') {
                 $ts = strtotime($fechaRaw);
                 if ($ts !== false) $fecha = date('Y-m-d', $ts);
             }
 
-            // Columnas VLOOKUP — ya resueltas vía $leer() con fallback a valor cacheado
             $idEscolaridad = (int)($leer(10, $r) ?: 0) ?: null;
             $idTipoSangre  = (int)($leer(12, $r) ?: 0) ?: null;
             $idParentesco  = (int)($leer(16, $r) ?: 0) ?: null;
@@ -2407,55 +2516,155 @@ class NominaFatigaController extends ResourceController
             $idPuesto      = (int)($leer(20, $r) ?: 0) ?: null;
             $idPeriocidad  = (int)($leer(22, $r) ?: 0) ?: null;
 
-            $batch[] = [
-                'nombre'              => $nombre,
-                'paterno'             => trim((string)($leer(2, $r) ?? '')),
-                'materno'             => trim((string)($leer(3, $r) ?? '')),
-                'curp'                => $curp,
-                'rfc'                 => strtoupper(trim((string)($leer(5, $r) ?? ''))),
-                'nss'                 => preg_replace('/\D/', '', (string)($leer(6, $r) ?? '')),
-                'CP_fiscal'           => str_pad(preg_replace('/\D/', '', (string)($leer(7, $r) ?? '')), 5, '0', STR_PAD_LEFT) ?: '00000',
-                'alergias'            => strtoupper(trim((string)($leer(8, $r) ?? 'NINGUNA'))),
-                'escolaridad'         => $idEscolaridad,
-                'tipoSangre'          => $idTipoSangre,
-                'telefonoEmergencia'  => preg_replace('/\D/', '', (string)($leer(13, $r) ?? '')),
-                'nombreEmergencia'    => strtoupper(trim((string)($leer(14, $r) ?? ''))),
-                'parentesco'          => $idParentesco,
-                'id_turno'            => $idTurno,
-                'id_puesto'           => $idPuesto,
-                'id_periocidad'       => $idPeriocidad,
-                'fecha_ingreso'       => $fecha,
-                'fecha_efectiva'      => $fecha,
-                'clave_interbancaria' => $clabe ?: null,
-                'id_banco'            => $idBanco,
-                'estatus'             => 1,
-                'acceso_biometrico'   => 1,
-                'created_by'          => (int)$actor->id,
-            ];
-            $procesadas++;
+            $salarioMensual = null;
+            if ($colSalarioMensual !== null) {
+                $val = $leer($colSalarioMensual, $r);
+                if (is_numeric($val) && (float)$val > 0) {
+                    $salarioMensual = round(((float)$val) * 2, 2); // capturan quincenal -- mensual = quincenal × 2
+                }
+            }
 
-            if (count($batch) >= 200) {
-                $db->table('empleados')->insertBatch($batch);
-                $batch = [];
+            $paterno  = trim((string)($leer(2, $r) ?? ''));
+            $materno  = trim((string)($leer(3, $r) ?? ''));
+            $rfc      = strtoupper(trim((string)($leer(5, $r) ?? '')));
+            $nss      = preg_replace('/\D/', '', (string)($leer(6, $r) ?? ''));
+            $cpRaw    = preg_replace('/\D/', '', (string)($leer(7, $r) ?? ''));
+            $cp       = $cpRaw !== '' ? str_pad($cpRaw, 5, '0', STR_PAD_LEFT) : null;
+            $alergias = trim((string)($leer(8, $r) ?? ''));
+            $telEmerg = preg_replace('/\D/', '', (string)($leer(13, $r) ?? ''));
+            $nomEmerg = trim((string)($leer(14, $r) ?? ''));
+
+            $filasLeidas[] = [
+                'curp' => $curp,
+                'nombre'   => $nombre !== '' ? $nombre : null,
+                'paterno'  => $paterno !== '' ? $paterno : null,
+                'materno'  => $materno !== '' ? $materno : null,
+                'rfc'      => $rfc !== '' ? $rfc : null,
+                'nss' => $nss ?: null, 'CP_fiscal' => $cp,
+                'alergias' => $alergias !== '' ? strtoupper($alergias) : null,
+                'escolaridad' => $idEscolaridad, 'tipoSangre' => $idTipoSangre,
+                'telefonoEmergencia' => $telEmerg ?: null,
+                'nombreEmergencia' => $nomEmerg !== '' ? strtoupper($nomEmerg) : null,
+                'parentesco' => $idParentesco, 'id_turno' => $idTurno, 'id_puesto' => $idPuesto,
+                'id_periocidad' => $idPeriocidad, 'fecha_ingreso' => $fecha, 'fecha_efectiva' => $fecha,
+                'clave_interbancaria' => $clabe ?: null, 'id_banco' => $idBanco,
+                'modo_sueldo' => $salarioMensual !== null ? 'salario' : null,
+                'salario_mensual' => $salarioMensual,
+            ];
+        }
+
+        if (empty($filasLeidas)) {
+            return ['procesadas' => 0, 'omitidas' => 0];
+        }
+
+        // ── PASO 2: bulk-fetch de CURPs Y RFCs que ya existen ──────────────
+        $curpsUnicos = array_unique(array_column($filasLeidas, 'curp'));
+        $rfcsUnicos  = array_unique(array_filter(array_column($filasLeidas, 'rfc')));
+
+        $existentesPorCurp = [];
+        foreach (array_chunk($curpsUnicos, 1000) as $chunk) {
+            $ph = implode(',', array_fill(0, count($chunk), '?'));
+            $rows = $db->query("SELECT id, curp FROM empleados WHERE curp IN ({$ph})", $chunk)->getResultArray();
+            foreach ($rows as $r) $existentesPorCurp[$r['curp']] = (int)$r['id'];
+        }
+
+        $existentesPorRfc = [];
+        if ($rfcsUnicos) {
+            foreach (array_chunk($rfcsUnicos, 1000) as $chunk) {
+                $ph = implode(',', array_fill(0, count($chunk), '?'));
+                $rows = $db->query("SELECT id, rfc FROM empleados WHERE rfc IN ({$ph})", $chunk)->getResultArray();
+                foreach ($rows as $r) $existentesPorRfc[$r['rfc']] = (int)$r['id'];
             }
         }
-        if ($batch) {
-            foreach (array_chunk($batch, 100) as $chunk) {
-                $db->query(
-                    "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,id_banco,estatus,acceso_biometrico,created_by) VALUES " .
-                    implode(',', array_map(fn($e) =>
-                        "('{$e['nombre']}','{$e['paterno']}','{$e['materno']}','{$e['curp']}','{$e['rfc']}','{$e['nss']}','{$e['CP_fiscal']}','{$e['alergias']}'," .
-                        ($e['escolaridad'] ?? 'NULL') . "," . ($e['tipoSangre'] ?? 'NULL') . ",'{$e['telefonoEmergencia']}','{$e['nombreEmergencia']}'," .
+
+        $procesadas = 0;
+        $insertadas = 0;
+        $actualizadasPorCurp = 0;
+        $actualizadasPorRfc  = 0; // -- estas son las que además corrigen CURP
+        $batchInsert = [];
+
+        $db->transStart();
+
+        foreach ($filasLeidas as $fila) {
+            $curp = $fila['curp'];
+            $rfc  = $fila['rfc'];
+
+            if (isset($existentesPorCurp[$curp])) {
+                // ── Nivel 1: match por CURP -- UPDATE normal, CURP no se toca ──
+                $set = [];
+                foreach ($fila as $campo => $valor) {
+                    if ($campo === 'curp') continue;
+                    if ($campo === 'clave_interbancaria') continue; // se agrega aparte, siempre
+                    if ($valor === null) continue;
+                    $set[$campo] = $valor;
+                }
+                $set['clave_interbancaria'] = $fila['clave_interbancaria']; // siempre, sea NULL o con valor
+
+                $db->table('empleados')->where('id', $existentesPorCurp[$curp])->update($set);
+                $actualizadasPorCurp++;
+
+            } elseif ($rfc && isset($existentesPorRfc[$rfc])) {
+                // ── Nivel 2: no encontró por CURP, pero SÍ por RFC -- mismo
+                // empleado con CURP mal capturado antes. Se corrige TODO,
+                // incluyendo el CURP.
+                $idExistente = $existentesPorRfc[$rfc];
+                $set = [];
+                foreach ($fila as $campo => $valor) {
+                    if ($campo === 'clave_interbancaria') continue;
+                    if ($valor === null) continue;
+                    $set[$campo] = $valor; // 👈 aquí SÍ se incluye 'curp' si viene con dato
+                }
+                $set['clave_interbancaria'] = $fila['clave_interbancaria'];
+
+                $db->table('empleados')->where('id', $idExistente)->update($set);
+                $actualizadasPorRfc++;
+
+            } else {
+                // ── No existe ni por CURP ni por RFC -- INSERT nuevo ──
+                $batchInsert[] = array_merge($fila, [
+                    'estatus' => 1,
+                    'acceso_biometrico' => 1,
+                    'created_by' => (int)$actor->id,
+                    'modo_sueldo' => $fila['modo_sueldo'] ?? 'tabulador',
+                    'fecha_ingreso' => $fila['fecha_ingreso'] ?? date('Y-m-d'),
+                    'fecha_efectiva' => $fila['fecha_efectiva'] ?? date('Y-m-d'),
+                ]);
+                $insertadas++;
+            }
+            $procesadas++;
+        }
+
+        if ($batchInsert) {
+            foreach (array_chunk($batchInsert, 100) as $chunk) {
+                $esc = fn($v) => str_replace("'", "''", (string)($v ?? ''));
+                $valores = array_map(function ($e) use ($esc) {
+                    return "('{$esc($e['nombre'])}','{$esc($e['paterno'])}','{$esc($e['materno'])}','{$esc($e['curp'])}'," .
+                        "'{$esc($e['rfc'])}','{$esc($e['nss'])}','{$esc($e['CP_fiscal'])}','{$esc($e['alergias'] ?: 'NINGUNA')}'," .
+                        ($e['escolaridad'] ?? 'NULL') . "," . ($e['tipoSangre'] ?? 'NULL') . "," .
+                        "'{$esc($e['telefonoEmergencia'])}','{$esc($e['nombreEmergencia'])}'," .
                         ($e['parentesco'] ?? 'NULL') . "," . ($e['id_turno'] ?? 'NULL') . "," . ($e['id_puesto'] ?? 'NULL') . "," .
                         ($e['id_periocidad'] ?? 'NULL') . ",'{$e['fecha_ingreso']}','{$e['fecha_efectiva']}'," .
-                        ($e['clave_interbancaria'] ? "'{$e['clave_interbancaria']}'" : 'NULL') . "," .
-                        ($e['id_banco'] ?? 'NULL') . ",1,1,{$e['created_by']})"
-                    , $chunk))
+                        ($e['clave_interbancaria'] ? "'{$esc($e['clave_interbancaria'])}'" : 'NULL') . "," .
+                        ($e['id_banco'] ?? 'NULL') . ",1,1,{$e['created_by']}," .
+                        "'{$e['modo_sueldo']}'," . ($e['salario_mensual'] !== null ? $e['salario_mensual'] : 'NULL') .
+                        ")";
+                }, $chunk);
+
+                $db->query(
+                    "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,id_banco,estatus,acceso_biometrico,created_by,modo_sueldo,salario_mensual) VALUES " .
+                    implode(',', $valores)
                 );
             }
         }
 
-        return ['procesadas' => $procesadas, 'omitidas' => $omitidas];
+        $db->transComplete();
+
+        return [
+            'procesadas' => $procesadas,
+            'insertadas' => $insertadas,
+            'actualizadas_por_curp' => $actualizadasPorCurp,
+            'actualizadas_por_rfc'  => $actualizadasPorRfc, // corrigieron CURP
+        ];
     }
 
     /* ── Procesa hoja "Bajas" → UPDATE estatus=0 en empleados ──── */
@@ -2730,18 +2939,44 @@ class NominaFatigaController extends ResourceController
                 return $this->generarDispersionAlbo($rows, $idNomina, $nomina);
 
             case 'bajio':
-                // ❌ Sin marcado — todavía no genera nada real
-                return $this->respond([
-                    'status' => 'error',
-                    'message' => "El formato BAJIO todavía no está implementado -- necesitamos definir el catálogo de códigos de banco (ej. '138-ABC CAPITAL') y de dónde sale el folio/No. de Archivo antes de generarlo.",
-                ], 501);
+                $actor = $this->request->jwtUser;
+                $db->table('nomina_fatiga')->where('id', $idNomina)->update([
+                    'fiscal_dispersado'    => 1,
+                    'fiscal_dispersado_at' => date('Y-m-d H:i:s'),
+                    'fiscal_dispersado_by' => (int)$actor->id,
+                    'fiscal_formato'       => $formato,
+                ]);
+                $this->marcarNominaSiCompleta($idNomina);
+
+                \App\Libraries\AuditLibrary::log((int)$actor->id, 'DISPERSAR_FISCAL', 'nomina_fatiga', (string)$idNomina,
+                    "Generó dispersión fiscal (bajio) — " . count($rows) . ' empleados');
+
+                return $this->generarDispersionBajio($rows, $idNomina, $nomina);
 
             case 'sindicato':
-                // ❌ Sin marcado — todavía no genera nada real
-                return $this->respond([
-                    'status' => 'error',
-                    'message' => "El formato SINDICATO todavía no está implementado -- necesitamos definir de dónde sale el FOLIO y la cuenta 'DEPOSITADO EN' / 'NO. CTA DE DEPÓSITO' del encabezado antes de generarlo.",
-                ], 501);
+                $depositadoEn   = trim((string)($this->request->getVar('deposito_en')     ?? ''));
+                $cuentaDeposito = trim((string)($this->request->getVar('cuenta_deposito') ?? ''));
+            
+                if ($depositadoEn === '' || $cuentaDeposito === '') {
+                    return $this->respond([
+                        'status'  => 'error',
+                        'message' => "Faltan parámetros 'deposito_en' y/o 'cuenta_deposito' -- cambian cada corrida, son obligatorios para Sindicato.",
+                    ], 400);
+                }
+            
+                $actor = $this->request->jwtUser;
+                $db->table('nomina_fatiga')->where('id', $idNomina)->update([
+                    'fiscal_dispersado'    => 1,
+                    'fiscal_dispersado_at' => date('Y-m-d H:i:s'),
+                    'fiscal_dispersado_by' => (int)$actor->id,
+                    'fiscal_formato'       => $formato,
+                ]);
+                $this->marcarNominaSiCompleta($idNomina);
+            
+                \App\Libraries\AuditLibrary::log((int)$actor->id, 'DISPERSAR_FISCAL', 'nomina_fatiga', (string)$idNomina,
+                    "Generó dispersión fiscal (sindicato) — " . count($rows) . ' empleados');
+            
+                return $this->generarDispersionSindicato($rows, $idNomina, $nomina, $depositadoEn, $cuentaDeposito);
 
             default:
                 return $this->respond(['status' => 'error', 'message' => "Formato '{$formato}' no reconocido. Usa: albo, bajio, sindicato"], 400);
@@ -2762,6 +2997,7 @@ class NominaFatigaController extends ResourceController
 
         $rows = $db->query("
             SELECT
+                nc2.archivo_original AS archivo_origen,
                 nfd.nombre_excel,
                 COALESCE(e.curp, nfd.curp_excel, '')                          AS curp,
                 COALESCE(e.rfc, '')                                           AS rfc,
@@ -2772,8 +3008,11 @@ class NominaFatigaController extends ResourceController
             FROM nomina_fatiga_detalle nfd
             LEFT JOIN empleados e      ON e.id = nfd.id_empleado
             LEFT JOIN multicatalogo mc ON mc.id = e.id_banco
+            LEFT JOIN nomina_fatiga_cargas nc2 ON nc2.id = nfd.id_carga
+
             WHERE nfd.id_nomina = ?
             AND nfd.{$campoValido} > 0
+            AND nfd.total_dispersion > 0
             ORDER BY nfd.nombre_excel ASC
         ", [$idNomina])->getResultArray();
 
@@ -2788,6 +3027,7 @@ class NominaFatigaController extends ResourceController
                 'clabe'  => preg_replace('/\D/', '', (string)$r['clabe']),
                 'banco'  => $r['banco'],
                 'monto'  => (float)$r['monto'],
+                'archivo_origen' => $r['archivo_origen'] ?? '',
             ];
         }, $rows);
     }
@@ -2850,6 +3090,229 @@ class NominaFatigaController extends ResourceController
         }
     }
 
+    /**
+     * ═══════════════════════════════════════════════════════════════
+     * SINDICATO (FUO) — generador de dispersión
+     * Pega generarDispersionSindicato() en NominaFatigaController, junto
+     * a generarDispersionAlbo(). Reemplaza el case 'sindicato': dentro de
+     * dispersionFiscal() por el segundo bloque de abajo.
+     * ═══════════════════════════════════════════════════════════════
+     */
+
+    /**
+     * Genera el FUO (Formato de Solicitud de Operación) para Sindicato.
+     *
+     * $cuentaDeposito y $depositadoEn vienen como parámetros del request,
+     * ya que cambian cada corrida (confirmado contigo).
+     * FOLIO se deja en blanco (automático/manual, según confirmaste).
+     * TESORERO y CONCEPTO DE PAGO quedan fijos ('AJ' y 'beneficio sindical'),
+     * igual que en tu plantilla original.
+     */
+    private function generarDispersionSindicato(array $rows, int $idNomina, array $nomina, string $depositadoEn, string $cuentaDeposito): mixed
+    {
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('FUO');
+
+        // ── Encabezado tipo FUO (replica el layout de tu plantilla original) ──
+        $sheet->setCellValue('B3', 'FORMATO DE SOLICITUD DE OPERACIÓN Y DE IGUAL FORMA PARA ALTAS DE CUENTAS (FUO) MONEDA EN PESOS');
+        $sheet->getStyle('B3')->getFont()->setBold(true);
+
+        $sheet->setCellValue('E5', 'TIPO DE OPERACIÓN');
+        $sheet->setCellValue('F5', 'DISPERSIÓN');
+        $sheet->setCellValue('J5', 'FOLIO');
+        $sheet->setCellValue('K5', ''); // en blanco, según confirmaste
+
+        $sheet->setCellValue('E6', 'NOMBRE CLIENTE');
+        $sheet->setCellValue('F6', 'SERPROSEP');
+        $sheet->setCellValue('J6', 'TESORERO');
+        $sheet->setCellValue('K6', 'AJ');
+
+        $sheet->setCellValue('E7', 'FECHA DE ENVÍO');
+        $sheet->setCellValue('F7', date('Y-m-d'));
+
+        $sheet->setCellValue('E8', 'DEPOSITADO EN');
+        $sheet->setCellValue('F8', $depositadoEn);
+
+        $sheet->setCellValue('E9', 'NO. CTA DE DEPÓSITO');
+        $sheet->setCellValue('F9', $cuentaDeposito);
+
+        $totalPagar = array_sum(array_column($rows, 'monto'));
+        $sheet->setCellValue('E15', 'TOTAL A PAGAR');
+        $sheet->setCellValue('F15', round($totalPagar, 2));
+
+        $sheet->setCellValue('J17', 'CONCEPTO DE PAGO:');
+        $sheet->setCellValue('J18', 'beneficio sindical');
+
+        // ── Tabla de datos ──
+        $headerRow = 19;
+        $sheet->setCellValue('D' . $headerRow, '#');
+        $sheet->setCellValue('E' . $headerRow, 'NOMBRE (S)');
+        $sheet->setCellValue('H' . $headerRow, 'BANCO');
+        $sheet->setCellValue('I' . $headerRow, 'CUENTA');
+        $sheet->setCellValue('J' . $headerRow, 'CLABE INTERBANCARIA');
+        $sheet->setCellValue('K' . $headerRow, 'MONTO A PAGAR');
+        $sheet->getStyle('D' . $headerRow . ':K' . $headerRow)->getFont()->setBold(true);
+
+        $r = $headerRow + 1;
+        $num = 1;
+        foreach ($rows as $row) {
+            $sheet->setCellValue('D' . $r, $num);
+            $sheet->setCellValue('E' . $r, $row['nombre']);
+            $sheet->setCellValue('H' . $r, $row['banco'] ?: '');
+            $sheet->setCellValue('I' . $r, ''); // "CUENTA" (no CLABE) -- no la tenemos, se deja en blanco
+            $sheet->setCellValue('J' . $r, $row['clabe']);
+            $sheet->setCellValue('K' . $r, round($row['monto'], 2));
+            $r++;
+            $num++;
+        }
+
+        foreach (range('D', 'K') as $col) {
+            $sheet->getColumnDimension($col)->setAutoSize(true);
+        }
+
+        $nombreArchivo = 'dispersion_fiscal_SINDICATO_' . $idNomina . '_' . date('Ymd_His') . '.xlsx';
+        $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer->save($tmpPath);
+
+        $content = file_get_contents($tmpPath);
+        @unlink($tmpPath);
+
+        return $this->response
+            ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+            ->setBody($content);
+    }
+
+
+        /**
+     * ═══════════════════════════════════════════════════════════════
+     * BANBAJÍO — generador de dispersión (Macro alta de cuentas)
+     * Pega CATALOGO_BANCOS_BAJIO como constante de la clase (junto a
+     * BANCO_MAP si ya tienes una), y generarDispersionBajio() junto a
+     * generarDispersionAlbo() / generarDispersionSindicato().
+     * Reemplaza el case 'bajio': dentro de dispersionFiscal().
+     * ═══════════════════════════════════════════════════════════════
+     */
+
+    /** Catálogo BanBajío: código Banxico (3 dígitos) => nombre del banco */
+    private const CATALOGO_BANCOS_BAJIO = [
+        '138' => 'ABC CAPITAL', '133' => 'ACTINVER', '062' => 'AFIRME', '638' => 'AKALA',
+        '706' => 'ARCUS', '652' => 'ASEA', '659' => 'ASP INTEGRA OPC', '128' => 'AUTOFIN',
+        '127' => 'AZTECA', '166' => 'BABIEN', '030' => 'BAJIO', '002' => 'BANAMEX',
+        '154' => 'BANCO FINTERRA', '006' => 'BANCOMEXT', '137' => 'BANCOPPEL', '160' => 'BANCO S3',
+        '152' => 'BANCREA', '019' => 'BANJERCITO', '147' => 'BANKAOOL', '106' => 'BANK OF AMERICA',
+        '009' => 'BANOBRAS', '072' => 'BANORTE / IXE', '058' => 'BANREGIO', '060' => 'BANSI',
+        '129' => 'BARCLAYS', '145' => 'BBASE', '012' => 'BBVA BANCOMER', '112' => 'BMONEX',
+        '677' => 'CAJA POP MEXICA', '683' => 'CAJA TELEFONIST', '630' => 'CB INTERCAM', '631' => 'CI BOLSA',
+        '143' => 'CIBANCO', '130' => 'COMPARTAMOS', '140' => 'CONSUBANCO', '126' => 'CREDIT SUISSE',
+        '680' => 'CRISTOBAL COLON', '151' => 'DONDE', '616' => 'FINAMEX', '634' => 'FINCOMUN',
+        '689' => 'FOMPED', '685' => 'FONDO (FIRA)', '601' => 'GBM', '636' => 'HDI SEGUROS',
+        '168' => 'HIPOTECARIA FED', '021' => 'HSBC', '155' => 'ICBC', '036' => 'INBURSA',
+        '902' => 'INDEVAL', '150' => 'INMOBILIARIO', '136' => 'INTERCAM BANCO', '686' => 'INVERCAP',
+        '059' => 'INVEX', '110' => 'JP MORGAN', '653' => 'KUSPIT', '670' => 'LIBERTAD',
+        '602' => 'MASARI', '042' => 'MIFEL', '158' => 'MIZUHO BANK', '600' => 'MONEXCB',
+        '108' => 'MUFG', '132' => 'MULTIVA BANCO', '613' => 'MULTIVA CBOLSA', '135' => 'NAFIN',
+        '684' => 'OPM', '649' => 'OSKNDIA', '148' => 'PAGATODO', '620' => 'PROFUTURO',
+        '156' => 'SABADELL', '014' => 'SANTANDER', '044' => 'SCOTIABANK', '157' => 'SHINHAN',
+        '623' => 'SKANDIA', '646' => 'STP', '648' => 'TACTIV CB', '656' => 'UNAGRA',
+        '617' => 'VALMEX', '605' => 'VALUE', '113' => 'VE POR MAS', '608' => 'VECTOR',
+        '141' => 'VOLKSWAGEN',
+    ];
+
+    /**
+     * Genera el .xlsx en formato "Macro alta de cuentas BanBajío".
+     * Columnas: #, Alias, Tipo Cuenta, No. Cuenta, Banco, Importe, IVA,
+     *           MedioPago, Nombre, RFC, Descripción, Referencia SPEI
+     *
+     * - Banco: código Banxico (3 dígitos, tomado de la CLABE) + nombre,
+     *   ej. "030-BAJIO" -- exactamente el mismo formato de tu catálogo.
+     * - Tipo Cuenta: 3 = CLABE (18 dígitos)
+     * - MedioPago: 40 = SPI, fijo para todas las filas (confirmado contigo)
+     */
+    private function generarDispersionBajio(array $rows, int $idNomina, array $nomina): mixed
+    {
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Captura');
+
+        $headers = ['#', 'Alias', 'Tipo Cuenta', 'No. Cuenta', 'Banco', 'Importe', 'IVA', 'MedioPago', 'Nombre', 'RFC', 'Descripción', 'Referencia SPEI'];
+        $sheet->fromArray($headers, null, 'A1');
+        $sheet->getStyle('A1:L1')->getFont()->setBold(true);
+
+        $rowNum = 2;
+        $num = 1;
+        $sinCodigo = [];
+
+        foreach ($rows as $r) {
+            $clabe = preg_replace('/\D/', '', $r['clabe'] ?? '');
+            $codBanco = substr($clabe, 0, 3);
+            $nombreBanco = self::CATALOGO_BANCOS_BAJIO[$codBanco] ?? null;
+
+            if ($nombreBanco === null) {
+                $sinCodigo[] = $r['nombre'] . ' (CLABE: ' . $clabe . ')';
+            }
+
+            $bancoTexto = $nombreBanco !== null ? "{$codBanco}-{$nombreBanco}" : $codBanco;
+            $alias = mb_substr(preg_replace('/[^A-Za-z0-9 ]/u', '', $r['nombre']), 0, 40);
+            $descripcion = mb_substr('Nomina fiscal ' . $nomina['nombre'], 0, 200);
+
+            $sheet->fromArray([
+                $num,
+                $alias,
+                3,               // Tipo Cuenta = CLABE
+                $clabe,
+                $bancoTexto,
+                round($r['monto'], 2),
+                0,                // IVA
+                40,               // MedioPago = SPI (fijo, confirmado)
+                $r['nombre'],
+                $r['rfc'] ?: '',
+                $descripcion,
+                '',               // Referencia SPEI -- sin referencia fija por ahora
+            ], null, 'A' . $rowNum);
+
+            $rowNum++;
+            $num++;
+        }
+
+        foreach (range('A', 'L') as $col) {
+            $sheet->getColumnDimension($col)->setAutoSize(true);
+        }
+
+        // Si hubo CLABEs con código de banco no reconocido, se agrega una hoja
+        // de aviso -- para que Finanzas revise esos casos antes de subir el archivo
+        if ($sinCodigo) {
+            $sheetAviso = $spreadsheet->createSheet();
+            $sheetAviso->setTitle('REVISAR');
+            $sheetAviso->setCellValue('A1', 'Empleados con código de banco NO reconocido (revisar CLABE):');
+            $sheetAviso->getStyle('A1')->getFont()->setBold(true);
+            $r = 2;
+            foreach ($sinCodigo as $s) {
+                $sheetAviso->setCellValue('A' . $r, $s);
+                $r++;
+            }
+            $sheetAviso->getColumnDimension('A')->setAutoSize(true);
+        }
+
+        $spreadsheet->setActiveSheetIndex(0);
+
+        $nombreArchivo = 'dispersion_fiscal_BANBAJIO_' . $idNomina . '_' . date('Ymd_His') . '.xlsx';
+        $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer->save($tmpPath);
+
+        $content = file_get_contents($tmpPath);
+        @unlink($tmpPath);
+
+        return $this->response
+            ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+            ->setBody($content);
+    }
     
     
 }

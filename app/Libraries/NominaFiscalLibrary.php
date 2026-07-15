@@ -110,8 +110,8 @@ class NominaFiscalLibrary
         $totalDispersion = round($sueldoNetoPagar, 2);
 
         return [
-            'sd'                => round($sd, 4),
-            'sdi'               => round($sdi, 4),
+            'sd'                => round($sd, 2),
+            'sdi'               => round($sdi, 2),
             'dias_laborados'    => $diasLaborados,
             'ingreso_quincenal' => $bi,
             'imss_obrero'       => $imss['total'],
