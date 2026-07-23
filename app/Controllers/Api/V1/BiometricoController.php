@@ -448,9 +448,13 @@ class BiometricoController extends ResourceController
         $dateTo   = trim($this->request->getVar('date_to')   ?? '');
         $page     = (int)($this->request->getVar('page')     ?? 1);
         $pageSize = (int)($this->request->getVar('pageSize') ?? 25);
-
+    
+        $servicioId = (int)($this->request->getVar('servicio_id') ?? 0); // NUEVO
+        $clienteId  = (int)($this->request->getVar('cliente_id')  ?? 0); // NUEVO
+        $zonaId     = (int)($this->request->getVar('zona_id')     ?? 0); // NUEVO
+    
         return $this->respond(
-            $model->registrosBiometrico($search, $dateFrom, $dateTo, $page, $pageSize)
+            $model->registrosBiometrico($search, $dateFrom, $dateTo, $page, $pageSize, $servicioId, $clienteId, $zonaId)
         );
     }
 
@@ -582,128 +586,172 @@ class BiometricoController extends ResourceController
 
     public function exportarXlsx(): mixed
     {
-        @set_time_limit(300);
-        @ini_set('memory_limit', '512M');
+    @set_time_limit(300);
+    @ini_set('memory_limit', '512M');
 
-        $search     = trim($this->request->getGet('search')      ?? '');
-        $dateFrom   = trim($this->request->getGet('date_from')   ?? '');
-        $dateTo     = trim($this->request->getGet('date_to')     ?? '');
-        $servicioId = (int)($this->request->getGet('servicio_id') ?? 0);
-        $clienteId  = (int)($this->request->getGet('cliente_id')  ?? 0);
+    $search     = trim($this->request->getGet('search')      ?? '');
+    $dateFrom   = trim($this->request->getGet('date_from')   ?? '');
+    $dateTo     = trim($this->request->getGet('date_to')     ?? '');
+    $servicioId = (int)($this->request->getGet('servicio_id') ?? 0);
+    $clienteId  = (int)($this->request->getGet('cliente_id')  ?? 0);
+    $zonaId     = (int)($this->request->getGet('zona_id')     ?? 0); // NUEVO
+
+    $db = \Config\Database::connect();
+
+    $where  = [];
+    $params = [];
+
+    if ($search !== '') {
+        $where[] = "(
+            CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) LIKE ?
+            OR CONCAT(cap.nombre, ' ', cap.paterno, ' ', cap.materno) LIKE ?
+            OR s.servicio LIKE ?
+            OR e.curp LIKE ?
+        )";
+        $like = '%' . $search . '%';
+        array_push($params, $like, $like, $like, $like);
+    }
+    if ($dateFrom !== '') { $where[] = 'a.fecha >= ?'; $params[] = $dateFrom; }
+    if ($dateTo   !== '') { $where[] = 'a.fecha <= ?'; $params[] = $dateTo; }
+    if ($servicioId > 0)  { $where[] = 's.id = ?';        $params[] = $servicioId; }
+    if ($clienteId  > 0)  { $where[] = 's.id_cliente = ?'; $params[] = $clienteId; }
+    if ($zonaId     > 0)  { $where[] = 's.id_zona = ?';    $params[] = $zonaId; } // NUEVO
+
+    $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+
+    $rows = $db->query("
+        SELECT
+            a.fecha, a.hora, a.id_status,
+            CASE
+                WHEN a.id_status = 1 THEN 'Entrada'
+                WHEN a.id_status = 2 THEN 'Salida'
+                ELSE 'Pendiente'
+            END AS estado,
+            a.estado_entrada, a.estado_salida, a.minutos_retardo,
+            a.latitud, a.longitud,
+            e.curp, e.rfc,
+            CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) AS empleado,
+            CONCAT(cap.nombre, ' ', cap.paterno, ' ', cap.materno) AS capturista,
+            s.servicio      AS servicio_nombre,
+            cli.nombre_corto AS cliente_nombre,
+            emp.empresa      AS empresa_nombre,
+            zon.zona         AS zona_nombre
+        FROM asistencias a
+        LEFT JOIN empleados e   ON e.id = a.id_empleado
+        LEFT JOIN empleados cap ON cap.id = a.id_capturista
+        LEFT JOIN servicios s   ON s.id = a.id_ubicacion
+        LEFT JOIN clientes cli  ON cli.id = s.id_cliente
+        LEFT JOIN empresas emp  ON emp.id = s.id_empresa
+        LEFT JOIN zonas zon     ON zon.id = s.id_zona
+        {$whereSql}
+        ORDER BY a.fecha DESC, a.hora DESC
+    ", $params)->getResultArray();
+
+    if (empty($rows)) {
+        return $this->respond(['status' => 'error', 'message' => 'No hay registros con esos filtros'], 422);
+    }
+
+    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle('Asistencias biometrico');
+
+    $headers = [
+        'Empleado', 'CURP', 'RFC', 'Fecha', 'Hora', 'Estado',
+        'Estado entrada', 'Minutos retardo', 'Estado salida',
+        'Servicio', 'Cliente', 'Empresa', 'Zona', 'Capturista',
+        'Latitud', 'Longitud', 'Google Maps',
+    ];
+    $sheet->fromArray($headers, null, 'A1');
+    $ultimaCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers));
+    $sheet->getStyle("A1:{$ultimaCol}1")->getFont()->setBold(true);
+
+    $rowNum = 2;
+    foreach ($rows as $r) {
+        $mapsUrl = ($r['latitud'] && $r['longitud'])
+            ? "https://www.google.com/maps?q={$r['latitud']},{$r['longitud']}"
+            : '';
+
+        $sheet->fromArray([
+            trim($r['empleado'] ?? ''),
+            $r['curp'] ?? '',
+            $r['rfc'] ?? '',
+            $r['fecha'] ?? '',
+            $r['hora'] ?? '',
+            $r['estado'] ?? '',
+            $r['estado_entrada'] ?? '',
+            (int)($r['minutos_retardo'] ?? 0),
+            $r['estado_salida'] ?? '',
+            $r['servicio_nombre'] ?? '',
+            $r['cliente_nombre'] ?? '',
+            $r['empresa_nombre'] ?? '',
+            $r['zona_nombre'] ?? '',
+            trim($r['capturista'] ?? '') ?: '—',
+            $r['latitud'] ?? '',
+            $r['longitud'] ?? '',
+            $mapsUrl,
+        ], null, 'A' . $rowNum);
+        $rowNum++;
+    }
+
+    $colIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
+    for ($c = 1; $c <= $colIndex; $c++) {
+        $sheet->getColumnDimensionByColumn($c)->setAutoSize(true);
+    }
+
+    $nombreArchivo = 'asistencias_biometrico_' . date('Ymd_His') . '.xlsx';
+    $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
+
+    $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+    $writer->save($tmpPath);
+
+    $content = file_get_contents($tmpPath);
+    @unlink($tmpPath);
+
+    return $this->response
+        ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
+        ->setBody($content);
+    }
+
+    public function show($id = null): mixed
+    {
+        $model = new NominaFatigaModel();
+        $nomina = $model->find((int)$id);
+        if (!$nomina) {
+            return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
+        }
 
         $db = \Config\Database::connect();
 
-        $where  = [];
-        $params = [];
-
-        if ($search !== '') {
-            $where[] = "(
-                CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) LIKE ?
-                OR CONCAT(cap.nombre, ' ', cap.paterno, ' ', cap.materno) LIKE ?
-                OR s.servicio LIKE ?
-                OR e.curp LIKE ?
-            )";
-            $like = '%' . $search . '%';
-            array_push($params, $like, $like, $like, $like);
-        }
-        if ($dateFrom !== '') { $where[] = 'a.fecha >= ?'; $params[] = $dateFrom; }
-        if ($dateTo   !== '') { $where[] = 'a.fecha <= ?'; $params[] = $dateTo; }
-        if ($servicioId > 0)  { $where[] = 's.id = ?';        $params[] = $servicioId; }
-        if ($clienteId  > 0)  { $where[] = 's.id_cliente = ?'; $params[] = $clienteId; }
-
-        $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
-
-        $rows = $db->query("
+        $detalle = $db->query("
             SELECT
-                a.fecha, a.hora, a.id_status,
-                CASE
-                    WHEN a.id_status = 1 THEN 'Entrada'
-                    WHEN a.id_status = 2 THEN 'Salida'
-                    ELSE 'Pendiente'
-                END AS estado,
-                a.estado_entrada, a.estado_salida, a.minutos_retardo,
-                a.latitud, a.longitud,
-                e.curp, e.rfc,
-                CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) AS empleado,
-                CONCAT(cap.nombre, ' ', cap.paterno, ' ', cap.materno) AS capturista,
-                s.servicio      AS servicio_nombre,
-                cli.nombre_corto AS cliente_nombre,
-                emp.empresa      AS empresa_nombre,
-                zon.zona         AS zona_nombre
-            FROM asistencias a
-            LEFT JOIN empleados e   ON e.id = a.id_empleado
-            LEFT JOIN usuarios cap  ON cap.id = a.id_capturista
-            LEFT JOIN servicios s   ON s.id = a.id_ubicacion
-            LEFT JOIN clientes cli  ON cli.id = s.id_cliente
-            LEFT JOIN empresas emp  ON emp.id = s.id_empresa
-            LEFT JOIN zonas zon     ON zon.id = s.id_zona
-            {$whereSql}
-            ORDER BY a.fecha DESC, a.hora DESC
-        ", $params)->getResultArray();
+                nfd.*,
+                nc.archivo_original AS archivo_origen,
+                nc.etiqueta          AS etiqueta_carga,
+                nc.created_by         AS subido_por_id,
+                NULLIF(TRIM(CONCAT(u.nombre, ' ', u.paterno, ' ', u.materno)), '') AS subido_por
+            FROM nomina_fatiga_detalle nfd
+            LEFT JOIN nomina_fatiga_cargas nc ON nc.id = nfd.id_carga
+            LEFT JOIN usuario u               ON u.id = nc.created_by
+            WHERE nfd.id_nomina = ?
+            ORDER BY nfd.nombre_excel ASC
+        ", [(int)$id])->getResultArray();
 
-        if (empty($rows)) {
-            return $this->respond(['status' => 'error', 'message' => 'No hay registros con esos filtros'], 422);
-        }
+        // NUEVO -- lista de cargas del lote, con quién subió cada una. Antes
+        // no venía nada de esto en show(), por eso los pills de "cargas ya
+        // incluidas" del modal nunca tenían datos.
+        $cargas = $db->query("
+            SELECT
+                nc.*,
+                NULLIF(TRIM(CONCAT(u.nombre, ' ', u.paterno, ' ', u.materno)), '') AS subido_por
+            FROM nomina_fatiga_cargas nc
+            LEFT JOIN usuario u ON u.id = nc.created_by
+            WHERE nc.id_nomina = ?
+            ORDER BY nc.created_at ASC
+        ", [(int)$id])->getResultArray();
 
-        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle('Asistencias biometrico');
+        $nomina['cargas'] = $cargas;
 
-        $headers = [
-            'Empleado', 'CURP', 'RFC', 'Fecha', 'Hora', 'Estado',
-            'Estado entrada', 'Minutos retardo', 'Estado salida',
-            'Servicio', 'Cliente', 'Empresa', 'Zona', 'Capturista',
-            'Latitud', 'Longitud', 'Google Maps',
-        ];
-        $sheet->fromArray($headers, null, 'A1');
-        $ultimaCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers));
-        $sheet->getStyle("A1:{$ultimaCol}1")->getFont()->setBold(true);
-
-        $rowNum = 2;
-        foreach ($rows as $r) {
-            $mapsUrl = ($r['latitud'] && $r['longitud'])
-                ? "https://www.google.com/maps?q={$r['latitud']},{$r['longitud']}"
-                : '';
-
-            $sheet->fromArray([
-                trim($r['empleado'] ?? ''),
-                $r['curp'] ?? '',
-                $r['rfc'] ?? '',
-                $r['fecha'] ?? '',
-                $r['hora'] ?? '',
-                $r['estado'] ?? '',
-                $r['estado_entrada'] ?? '',
-                (int)($r['minutos_retardo'] ?? 0),
-                $r['estado_salida'] ?? '',
-                $r['servicio_nombre'] ?? '',
-                $r['cliente_nombre'] ?? '',
-                $r['empresa_nombre'] ?? '',
-                $r['zona_nombre'] ?? '',
-                trim($r['capturista'] ?? '') ?: '—',
-                $r['latitud'] ?? '',
-                $r['longitud'] ?? '',
-                $mapsUrl,
-            ], null, 'A' . $rowNum);
-            $rowNum++;
-        }
-
-        $colIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
-        for ($c = 1; $c <= $colIndex; $c++) {
-            $sheet->getColumnDimensionByColumn($c)->setAutoSize(true);
-        }
-
-        $nombreArchivo = 'asistencias_biometrico_' . date('Ymd_His') . '.xlsx';
-        $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
-
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
-        $writer->save($tmpPath);
-
-        $content = file_get_contents($tmpPath);
-        @unlink($tmpPath);
-
-        return $this->response
-            ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
-            ->setBody($content);
+        return $this->respond(['status' => 'ok', 'data' => ['nomina' => $nomina, 'detalle' => $detalle]]);
     }
 }

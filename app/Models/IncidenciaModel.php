@@ -79,7 +79,16 @@ class IncidenciaModel extends Model
     /**
      * Registros del biométrico con búsqueda y paginación.
      */
-    public function registrosBiometrico(string $search, string $dateFrom, string $dateTo, int $page, int $pageSize): array
+    public function registrosBiometrico(
+        string $search,
+        string $dateFrom,
+        string $dateTo,
+        int $page,
+        int $pageSize,
+        int $servicioId = 0, // NUEVO
+        int $clienteId  = 0, // NUEVO
+        int $zonaId     = 0  // NUEVO
+    ): array
     {
         $pageSize = max(1, min(200, $pageSize));
         $offset   = ($page - 1) * $pageSize;
@@ -105,7 +114,6 @@ class IncidenciaModel extends Model
 
         if ($search !== '') {
             $norm = preg_replace('/\s+/', ' ', trim($search));
-            $q    = '%' . $norm . '%';
             $baseQuery->groupStart()
                 ->like("CONCAT_WS(' ', e.nombre, e.paterno, e.materno)", $norm)
                 ->orLike("CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno)", $norm)
@@ -121,6 +129,11 @@ class IncidenciaModel extends Model
         } elseif ($dateTo !== '') {
             $baseQuery->where('a.fecha <=', $dateTo);
         }
+
+        // NUEVO -- filtros por servicio/cliente/zona
+        if ($servicioId > 0) $baseQuery->where('s.id', $servicioId);
+        if ($clienteId  > 0) $baseQuery->where('s.id_cliente', $clienteId);
+        if ($zonaId     > 0) $baseQuery->where('s.id_zona', $zonaId);
 
         // Total — clona la query antes de agregar limit/offset
         $total = $db->table('asistencias a')
@@ -147,6 +160,12 @@ class IncidenciaModel extends Model
             $total->where('a.fecha <=', $dateTo);
         }
 
+        // NUEVO -- mismos filtros en el conteo, si no el total/paginación
+        // quedarían mal contra lo que en verdad se muestra.
+        if ($servicioId > 0) $total->where('s.id', $servicioId);
+        if ($clienteId  > 0) $total->where('s.id_cliente', $clienteId);
+        if ($zonaId     > 0) $total->where('s.id_zona', $zonaId);
+
         $totalCount = (int)($total->countAllResults());
 
         // Datos paginados
@@ -160,13 +179,16 @@ class IncidenciaModel extends Model
             'status' => 'ok',
             'data'   => $data,
             'meta'   => [
-                'page'       => $page,
-                'pageSize'   => $pageSize,
-                'total'      => $totalCount,
-                'totalPages' => (int)ceil($totalCount / max(1, $pageSize)),
-                'search'     => $search,
-                'date_from'  => $dateFrom,
-                'date_to'    => $dateTo,
+                'page'        => $page,
+                'pageSize'    => $pageSize,
+                'total'       => $totalCount,
+                'totalPages'  => (int)ceil($totalCount / max(1, $pageSize)),
+                'search'      => $search,
+                'date_from'   => $dateFrom,
+                'date_to'     => $dateTo,
+                'servicio_id' => $servicioId,
+                'cliente_id'  => $clienteId,
+                'zona_id'     => $zonaId,
             ],
         ];
     }
