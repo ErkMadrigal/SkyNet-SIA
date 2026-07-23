@@ -390,7 +390,7 @@ class NominaFatigaController extends ResourceController
     }
 
     /** GET /api/v1/nomina/:id */
-    public function show($id = null): mixed
+   public function show($id = null): mixed
     {
         $model = new NominaFatigaModel();
         $nomina = $model->find((int)$id);
@@ -400,16 +400,34 @@ class NominaFatigaController extends ResourceController
 
         $db = \Config\Database::connect();
 
-        // 👇 Cambiado de Query Builder a query() con JOIN, para traer archivo_origen
         $detalle = $db->query("
             SELECT
                 nfd.*,
-                nc.archivo_original AS archivo_origen
+                nc.archivo_original AS archivo_origen,
+                nc.etiqueta          AS etiqueta_carga,
+                nc.created_by         AS subido_por_id,
+                NULLIF(TRIM(CONCAT(u.nombre, ' ', u.paterno, ' ', u.materno)), '') AS subido_por
             FROM nomina_fatiga_detalle nfd
             LEFT JOIN nomina_fatiga_cargas nc ON nc.id = nfd.id_carga
+            LEFT JOIN usuarios u              ON u.id = nc.created_by
             WHERE nfd.id_nomina = ?
             ORDER BY nfd.nombre_excel ASC
         ", [(int)$id])->getResultArray();
+
+        // NUEVO -- lista de cargas del lote, con quién subió cada una. Antes
+        // no venía nada de esto en show(), por eso los pills de "cargas ya
+        // incluidas" del modal nunca tenían datos.
+        $cargas = $db->query("
+            SELECT
+                nc.*,
+                NULLIF(TRIM(CONCAT(u.nombre, ' ', u.paterno, ' ', u.materno)), '') AS subido_por
+            FROM nomina_fatiga_cargas nc
+            LEFT JOIN usuarios u ON u.id = nc.created_by
+            WHERE nc.id_nomina = ?
+            ORDER BY nc.created_at ASC
+        ", [(int)$id])->getResultArray();
+
+        $nomina['cargas'] = $cargas;
 
         return $this->respond(['status' => 'ok', 'data' => ['nomina' => $nomina, 'detalle' => $detalle]]);
     }
@@ -429,31 +447,47 @@ class NominaFatigaController extends ResourceController
             return $this->respond(['status' => 'error', 'message' => 'Registro no encontrado'], 404);
         }
 
-        $adicional       = (float)($this->request->getVar('adicional') ?? $det['adicional']);
-        $otrosDescuentos = (float)($this->request->getVar('otros_descuentos') ?? $det['otros_descuentos']);
-        $comentarios     = $this->request->getVar('comentarios') ?? $det['comentarios'];
+        $nominaRow = $db->table('nomina_fatiga')->where('id', (int)$id)->get()->getRowArray();
+        if (!$nominaRow) {
+            return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
+        }
+        if ($nominaRow['estatus'] !== 'borrador') {
+            return $this->respond(['status' => 'error', 'message' => 'Solo se puede editar el detalle mientras la nómina está en borrador'], 422);
+        }
+
+        // Body puede venir como JSON (fetch/axios con Content-Type: application/json)
+        // o como form-urlencoded -- getVar() solo entiende el segundo caso, así que
+        // primero probamos JSON y usamos getVar()/el valor actual como fallback.
+        $body = $this->request->getJSON(true) ?? [];
+
+        $adicional       = (float)($body['adicional']         ?? $this->request->getVar('adicional')         ?? $det['adicional']);
+        $otrosDescuentos = (float)($body['otros_descuentos']   ?? $this->request->getVar('otros_descuentos')   ?? $det['otros_descuentos']);
+        $comentarios     = $body['comentarios']                ?? $this->request->getVar('comentarios')        ?? $det['comentarios'];
 
         $nuevoTotal = (float)$det['sueldo_semanal'] + (float)$det['tiempo_extra'] + $adicional
                     - (float)$det['descuento_faltas'] - $otrosDescuentos - (float)$det['descuento_incidencias'];
         $nuevoTotal = max(0, round($nuevoTotal, 2));
 
         $db->table('nomina_fatiga_detalle')->where('id', (int)$detId)->update([
-            'adicional'           => $adicional,
-            'otros_descuentos'    => $otrosDescuentos,
-            'comentarios'         => $comentarios,
-            'total'               => $nuevoTotal,
+            'adicional' => $adicional,
+            'otros_descuentos' => $otrosDescuentos,
+            'comentarios' => $comentarios,
+            'total' => $nuevoTotal,
             'editado_manualmente' => 1,
-            'updated_at'          => date('Y-m-d H:i:s'),
-            'updated_by'          => (int)$actor->id,
+            'updated_at' => date('Y-m-d H:i:s'),
+            'updated_by' => (int)$actor->id,
         ]);
 
-        // Recalcular total_pagar de la nómina
         $sumaTotal = $db->table('nomina_fatiga_detalle')->selectSum('total')->where('id_nomina', (int)$id)->get()->getRow()->total ?? 0;
-        $nominaModel = new NominaFatigaModel();
-        $nominaModel->update((int)$id, ['total_pagar' => $sumaTotal]);
+        (new \App\Models\NominaFatigaModel())->update((int)$id, ['total_pagar' => $sumaTotal]);
 
-        AuditLibrary::log((int)$actor->id, 'EDITAR_NOMINA_FATIGA_DETALLE', 'nomina_fatiga_detalle', (string)$detId,
-            "Editó adicional/descuentos — nuevo total: {$nuevoTotal}");
+        \App\Libraries\AuditLibrary::log(
+            $actor->id,
+            'nomina_fatiga_detalle',
+            (int)$detId,
+            'editar',
+            "Editó adicional/otros_descuentos/comentarios de detalle #{$detId} (nómina #{$id})"
+        );
 
         return $this->respond(['status' => 'ok', 'message' => 'Actualizado', 'data' => ['total' => $nuevoTotal]]);
     }
@@ -686,10 +720,17 @@ class NominaFatigaController extends ResourceController
      */
     private const CHUNK_SIZE_ASISTENCIA = 100;
 
-    private function guardarFilasAsistencia(array $filas, string $nombre, ?string $periodoInicio, ?string $periodoFin, string $nombreArchivoOriginal, object $actor): mixed
+    private function guardarFilasAsistencia(
+        array $filas,
+        string $nombre,
+        ?string $periodoInicio,
+        ?string $periodoFin,
+        string $nombreArchivoOriginal,
+        object $actor,
+        ?int $idNominaExistente = null,
+        ?string $etiqueta = null   // NUEVO -- etiqueta
+    ): mixed
     {
-        // Subir límites de ejecución como red de seguridad — el chunking debería
-        // hacer innecesario llegar a estos topes, pero por si el servidor es lento.
         @set_time_limit(180);
         if (function_exists('ini_set')) {
             @ini_set('memory_limit', '512M');
@@ -698,16 +739,63 @@ class NominaFatigaController extends ResourceController
         $db = \Config\Database::connect();
 
         $nominaModel = new \App\Models\NominaFatigaModel();
-        $idNomina = $nominaModel->insert([
-            'nombre'           => $nombre,
-            'periodo_inicio'   => $periodoInicio,
-            'periodo_fin'      => $periodoFin,
+
+        if ($idNominaExistente) {
+            $idNomina = $idNominaExistente;
+        } else {
+            $idNomina = $nominaModel->insert([
+                'nombre'           => $nombre,
+                'periodo_inicio'   => $periodoInicio,
+                'periodo_fin'      => $periodoFin,
+                'archivo_original' => $nombreArchivoOriginal,
+                'total_empleados'  => count($filas),
+                'estatus'          => 'borrador',
+                'created_by'       => (int)$actor->id,
+                'created_at'       => date('Y-m-d H:i:s'),
+            ]);
+        }
+
+        // NUEVO -- crear la carga de esta captura, igual patrón que
+        // procesarXlsm()/iniciarAsistencia(): detecta zona/cliente/empresa
+        // mayoritarios vía id_servicio, y guarda quién la subió + la etiqueta.
+        $idsServicioRaw = array_unique(array_filter(array_map(fn($f) => (int)($f['id_servicio'] ?? 0), $filas)));
+        $nombreCarga = 'Sin zona detectada';
+        $idZonaCarga = $idClienteCarga = $idEmpresaCarga = null;
+
+        if ($idsServicioRaw) {
+            $rowZona = $db->query("
+                SELECT z.id AS id_zona, z.zona AS zona_nombre, c.id AS id_cliente, e.id AS id_empresa, COUNT(*) AS cuenta
+                FROM servicios s
+                JOIN zonas z    ON s.id_zona = z.id
+                JOIN clientes c ON s.id_cliente = c.id
+                JOIN empresas e ON s.id_empresa = e.id
+                WHERE s.id IN (" . implode(',', $idsServicioRaw) . ")
+                GROUP BY z.id, z.zona, c.id, e.id
+                ORDER BY cuenta DESC
+                LIMIT 1
+            ")->getRowArray();
+            if ($rowZona) {
+                $nombreCarga    = $rowZona['zona_nombre'] ?? 'Sin zona detectada';
+                $idZonaCarga    = $rowZona['id_zona'] ?? null;
+                $idClienteCarga = $rowZona['id_cliente'] ?? null;
+                $idEmpresaCarga = $rowZona['id_empresa'] ?? null;
+            }
+        }
+
+        $db->table('nomina_fatiga_cargas')->insert([
+            'id_nomina'        => $idNomina,
+            'nombre_carga'     => $nombreCarga,
+            'etiqueta'         => $etiqueta,
+            'id_zona'          => $idZonaCarga,
+            'id_cliente'       => $idClienteCarga,
+            'id_empresa'       => $idEmpresaCarga,
             'archivo_original' => $nombreArchivoOriginal,
             'total_empleados'  => count($filas),
-            'estatus'          => 'borrador',
+            'estatus'          => 'completa', // síncrono -- no queda pendiente_calculo
             'created_by'       => (int)$actor->id,
             'created_at'       => date('Y-m-d H:i:s'),
         ]);
+        $idCarga = $db->insertID();
 
         $totalPagar   = 0;
         $sinMatch     = 0;
@@ -752,7 +840,6 @@ class NominaFatigaController extends ResourceController
             }
 
             // ── 3. Bulk-fetch de tabuladores para las combinaciones (puesto, zona) del chunk ──
-            // Construimos los pares únicos (id_puesto, id_zona) que realmente aparecen en este chunk
             $paresUnicos = [];
             foreach ($chunk as $fila) {
                 $idEmp = (int)($fila['id_empleado'] ?? 0);
@@ -767,21 +854,18 @@ class NominaFatigaController extends ResourceController
 
             $tabuladorPorPar = [];
             if ($paresUnicos) {
-                // Trae todos los tabuladores activos de las zonas involucradas, filtra por puesto en PHP
-                // (evita un query dinámico gigante con muchos OR; las zonas en juego suelen ser pocas)
                 $idsZona = array_unique(array_column($paresUnicos, 'id_zona'));
                 $rows = $db->query("
                     SELECT tsd.id_puesto, ts.id_zona, tsd.sueldo, tsd.bono, tsd.descuento, ts.id AS id_tabulador
                     FROM tabulador_salarios_detalle tsd
                     JOIN tabulador_salarios ts ON tsd.id_tabulador = ts.id
                     WHERE ts.id_zona IN (" . implode(',', $idsZona) . ")
-                      AND ts.estatus = 1 AND tsd.estatus = 1
+                    AND ts.estatus = 1 AND tsd.estatus = 1
                     ORDER BY ts.id DESC
                 ")->getResultArray();
 
                 foreach ($rows as $r) {
                     $key = $r['id_puesto'] . '_' . $r['id_zona'];
-                    // Como viene ORDER BY ts.id DESC, el primero que llega por key es el más reciente — lo conservamos
                     if (!isset($tabuladorPorPar[$key])) {
                         $tabuladorPorPar[$key] = $r;
                     }
@@ -823,6 +907,7 @@ class NominaFatigaController extends ResourceController
 
                 $batchInsert[] = [
                     'id_nomina'             => $idNomina,
+                    'id_carga'              => $idCarga, // NUEVO -- etiqueta/quién-subió viven en la carga
                     'id_empleado'           => $empleado['id'] ?? null,
                     'curp_excel'            => '',
                     'nombre_excel'          => $fila['nombre'] ?? '',
@@ -862,7 +947,15 @@ class NominaFatigaController extends ResourceController
             }
         }
 
-        $nominaModel->update($idNomina, ['total_pagar' => $totalPagar]);
+        if ($idNominaExistente) {
+            $db->table('nomina_fatiga')
+                ->set('total_pagar', 'total_pagar + ' . (float)$totalPagar, false)
+                ->set('total_empleados', 'total_empleados + ' . (int)$procesadas, false)
+                ->where('id', $idNomina)
+                ->update();
+        } else {
+            $nominaModel->update($idNomina, ['total_pagar' => $totalPagar]);
+        }
 
         \App\Libraries\AuditLibrary::log((int)$actor->id, 'CREAR_NOMINA_FATIGA', 'nomina_fatiga', (string)$idNomina,
             "Procesó asistencia '{$nombre}' — {$procesadas} empleados, {$sinMatch} sin match, {$sinTabulador} sin tabulador");
@@ -872,12 +965,52 @@ class NominaFatigaController extends ResourceController
             'message' => 'Nómina procesada correctamente',
             'data'    => [
                 'id_nomina'        => $idNomina,
+                'id_carga'         => $idCarga,
                 'total_empleados'  => $procesadas,
                 'sin_match'        => $sinMatch,
                 'sin_tabulador'    => $sinTabulador,
                 'total_pagar'      => round($totalPagar, 2),
             ],
         ], 201);
+    }
+
+    
+    public function guardarAsistenciaManual(): mixed
+    {
+        $json = $this->request->getJSON(true);
+        if (!$json) {
+            return $this->respond(['status' => 'error', 'message' => 'JSON inválido o vacío'], 400);
+        }
+
+        $filas         = $json['filas'] ?? [];
+        $nombre        = $json['nombre'] ?? '';
+        $periodoInicio = $json['periodo_inicio'] ?? null;
+        $periodoFin    = $json['periodo_fin'] ?? null;
+        $idNomina      = isset($json['id_nomina']) ? (int)$json['id_nomina'] : null;
+        $etiqueta      = isset($json['etiqueta']) ? (trim((string)$json['etiqueta']) ?: null) : null; // NUEVO
+
+        if (empty($filas)) {
+            return $this->respond(['status' => 'error', 'message' => 'No hay filas que guardar'], 400);
+        }
+        if (!$idNomina && trim($nombre) === '') {
+            return $this->respond(['status' => 'error', 'message' => 'Falta el nombre de la nómina'], 400);
+        }
+
+        $actor = $this->request->jwtUser;
+        if (!$actor) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo identificar al usuario'], 401);
+        }
+
+        return $this->guardarFilasAsistencia(
+            $filas,
+            $nombre,
+            $periodoInicio,
+            $periodoFin,
+            '',              // sin archivo -- captura manual
+            $actor,
+            $idNomina,       // null = lote nuevo, o el id del que se está complementando
+            $etiqueta        // NUEVO
+        );
     }
 
     /** Revisa si el archivo tiene una hoja cuyo nombre sea "Asistencia" (sin importar mayúsculas/espacios) */
@@ -1372,12 +1505,12 @@ class NominaFatigaController extends ResourceController
     {
         $idNomina = (int)$id;
         $db = \Config\Database::connect();
-
+    
         $nomina = $db->table('nomina_fatiga')->where('id', $idNomina)->get()->getRowArray();
         if (!$nomina) {
             return $this->respond(['status' => 'error', 'message' => 'Nómina no encontrada'], 404);
         }
-
+    
         $rows = $db->query("
             SELECT
                 nfd.*,
@@ -1409,11 +1542,11 @@ class NominaFatigaController extends ResourceController
             WHERE nfd.id_nomina = ?
             ORDER BY nfd.nombre_excel ASC
         ", [$idNomina])->getResultArray();
-
+    
         if (empty($rows)) {
             return $this->respond(['status' => 'error', 'message' => 'La nómina no tiene detalle'], 422);
         }
-
+    
         $diasCanonicos = [];
         foreach ($rows as $r) {
             $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
@@ -1422,9 +1555,9 @@ class NominaFatigaController extends ResourceController
                 break;
             }
         }
-
+    
         $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-
+    
         $headersFijos = [
             'CURP', 'RFC', 'CP Fiscal', 'NSS', 'Fecha Ingreso',
             'Paterno', 'Materno', 'Nombre', 'Turno', 'Puesto',
@@ -1432,34 +1565,34 @@ class NominaFatigaController extends ResourceController
             'Servicio', 'Elementos', 'Ubicación', 'Cliente', 'Empresa', 'Zona',
         ];
         $headersDias = array_map(fn($d) => (string)$d, $diasCanonicos);
-
+    
         // ═══ HOJA 1 — PRE-NÓMINA ═══
         $sheet1 = $spreadsheet->getActiveSheet();
         $sheet1->setTitle('Pre-nomina');
-
+    
         $headersCalculo1 = [
             'Zona', '★', 'Sueldo', 'Sueldo Quincenal', 'Extra', 'Adicional', 'Fest/Dob',
             'Faltas', 'FONACOT', 'INFONAVIT', 'Pensión', 'Otros',
             'Neto pagar', 'Bono',
-            'Comentarios', 'Archivo Origen', // 👈 NUEVO
+            'Comentarios', 'Archivo Origen',
         ];
         $headers1 = array_merge($headersFijos, $headersDias, $headersCalculo1);
         $sheet1->fromArray($headers1, null, 'A1');
         $ultimaColLetra1 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers1));
         $sheet1->getStyle("A1:{$ultimaColLetra1}1")->getFont()->setBold(true);
-
+    
         $rowNum = 2;
         foreach ($rows as $r) {
             $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
             $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
             $festDob  = round((float)($r['monto_festivos'] ?? 0) + (float)($r['monto_dobletes'] ?? 0), 2);
-
+    
             $fila = array_merge([
                 $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
                 $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
                 $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
                 $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
-                $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
+                $r['servicio'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
                 $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
             ], $diasVals, [
                 $r['zona'] ?? '',
@@ -1476,40 +1609,40 @@ class NominaFatigaController extends ResourceController
                 (float)($r['otros_descuentos'] ?? 0),
                 (float)($r['total'] ?? 0),
                 (float)($r['bono'] ?? 0),
-                $r['comentarios'] ?? '',       // 👈 NUEVO
-                $r['archivo_origen'] ?? '',    // 👈 NUEVO
+                $r['comentarios'] ?? '',
+                $r['archivo_origen'] ?? '',
             ]);
-
+    
             $sheet1->fromArray($fila, null, 'A' . $rowNum);
             $rowNum++;
         }
-
+    
         // ═══ HOJA 2 — NÓMINA FISCAL ═══
         $sheet2 = $spreadsheet->createSheet();
         $sheet2->setTitle('Nomina Fiscal');
-
+    
         $headersCalculo2 = [
             'Días Lab.', 'Sueldo Quincenal', 'SD', 'SDI', 'Ingreso Q', 'ISR antes Subs.',
             'IMSS', 'INFONAVIT', 'FONACOT', 'Pensión', 'Subs. Empleo',
             'ISR neto', 'Neto Fiscal', 'IAS', 'Total Disp.',
-            'Comentarios', 'Archivo Origen', // 👈 NUEVO
+            'Comentarios', 'Archivo Origen',
         ];
         $headers2 = array_merge($headersFijos, $headersDias, $headersCalculo2);
         $sheet2->fromArray($headers2, null, 'A1');
         $ultimaColLetra2 = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex(count($headers2));
         $sheet2->getStyle("A1:{$ultimaColLetra2}1")->getFont()->setBold(true);
-
+    
         $rowNum = 2;
         foreach ($rows as $r) {
             $cal = json_decode($r['calendario_json'] ?? '[]', true) ?: [];
             $diasVals = array_map(fn($d) => $cal[$d] ?? '', $diasCanonicos);
-
+    
             $fila = array_merge([
                 $r['curp'] ?? '', $r['rfc'] ?? '', $r['CP_fiscal'] ?? '', $r['nss'] ?? '',
                 $r['fecha_ingreso'] ?? '', $r['paterno'] ?? '', $r['materno'] ?? '', $r['nombre'] ?? '',
                 $r['turno_valor'] ?? '', $r['puesto_valor'] ?? '',
                 $r['clave_interbancaria'] ?? '', $r['banco_valor'] ?? '',
-                $r['servicio_nombre'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
+                $r['servicio'] ?? '', $r['servicio_elementos'] ?? '', $r['servicio_ubicacion'] ?? '',
                 $r['cliente_nombre'] ?? '', $r['empresa_nombre'] ?? '', $r['zona_nombre'] ?? '',
             ], $diasVals, [
                 (int)($r['dias_pagados'] ?? 0),
@@ -1527,37 +1660,38 @@ class NominaFatigaController extends ResourceController
                 (float)($r['neto_fiscal'] ?? 0),
                 (float)($r['ias'] ?? 0),
                 (float)($r['total_dispersion'] ?? $r['total'] ?? 0),
-                $r['comentarios'] ?? '',       // 👈 NUEVO
-                $r['archivo_origen'] ?? '',    // 👈 NUEVO
+                $r['comentarios'] ?? '',
+                $r['archivo_origen'] ?? '',
             ]);
-
+    
             $sheet2->fromArray($fila, null, 'A' . $rowNum);
             $rowNum++;
         }
-
+    
         $spreadsheet->setActiveSheetIndex(0);
-
+    
         foreach ([$sheet1, $sheet2] as $sh) {
             $colIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sh->getHighestColumn());
             for ($c = 1; $c <= $colIndex; $c++) {
                 $sh->getColumnDimensionByColumn($c)->setAutoSize(true);
             }
         }
-
+    
         $nombreArchivo = 'nomina_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $nomina['nombre']) . '_' . date('Ymd_His') . '.xlsx';
         $tmpPath = WRITEPATH . 'uploads/' . $nombreArchivo;
-
+    
         $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
         $writer->save($tmpPath);
-
+    
         $content = file_get_contents($tmpPath);
         @unlink($tmpPath);
-
+    
         return $this->response
             ->setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             ->setHeader('Content-Disposition', 'attachment; filename="' . $nombreArchivo . '"')
             ->setBody($content);
     }
+ 
 
     public function iniciarAsistencia(): mixed
     {
@@ -1566,10 +1700,11 @@ class NominaFatigaController extends ResourceController
 
         $actor = $this->request->jwtUser;
 
-        $idNominaExistente = (int)($this->request->getVar('id_nomina') ?? 0); // NUEVO: lote existente
+        $idNominaExistente = (int)($this->request->getVar('id_nomina') ?? 0);
         $nombre        = trim($this->request->getVar('nombre') ?? 'Nómina ' . date('Y-m-d H:i'));
         $periodoInicio = $this->request->getVar('periodo_inicio') ?: null;
         $periodoFin    = $this->request->getVar('periodo_fin') ?: null;
+        $etiqueta      = trim((string)($this->request->getVar('etiqueta') ?? '')) ?: null; // NUEVO -- etiqueta
 
         $archivo   = $this->request->getFile('archivo');
         $filasJson = $this->request->getVar('filas');
@@ -1604,8 +1739,8 @@ class NominaFatigaController extends ResourceController
 
         $nombreCarga = 'Sin zona detectada';
         $idZonaCarga = null;
-        $clienteCarga = null;
-        $empresaCarga = null;
+        $idClienteCarga = null;
+        $idEmpresaCarga = null;
 
         if ($idsServicioRaw) {
             $rows = $db->query("
@@ -1625,8 +1760,8 @@ class NominaFatigaController extends ResourceController
             if ($rows) {
                 $nombreCarga = $rows['zona_nombre'] ?? 'Sin zona detectada';
                 $idZonaCarga = $rows['id_zona'] ?? null;
-                $idClienteCarga = $rows['id_cliente'] ?? null;   // antes: $clienteCarga (nombre)
-                $idEmpresaCarga = $rows['id_empresa'] ?? null;   // antes: $empresaCarga (nombre)
+                $idClienteCarga = $rows['id_cliente'] ?? null;
+                $idEmpresaCarga = $rows['id_empresa'] ?? null;
             }
         }
 
@@ -1659,6 +1794,7 @@ class NominaFatigaController extends ResourceController
         $db->table('nomina_fatiga_cargas')->insert([
             'id_nomina'        => $idNomina,
             'nombre_carga'     => $nombreCarga,
+            'etiqueta'         => $etiqueta, // NUEVO -- etiqueta
             'id_zona'          => $idZonaCarga,
             'id_cliente'       => $idClienteCarga,
             'id_empresa'       => $idEmpresaCarga,
@@ -1680,7 +1816,7 @@ class NominaFatigaController extends ResourceController
         foreach ($filas as $fila) {
             $batch[] = [
                 'id_nomina'         => $idNomina,
-                'id_carga'          => $idCarga, // NUEVO
+                'id_carga'          => $idCarga,
                 'id_empleado'       => null,
                 'curp_excel'        => '',
                 'nombre_excel'      => $fila['nombre'] ?? '',
@@ -1719,7 +1855,8 @@ class NominaFatigaController extends ResourceController
             'data'   => [
                 'id_nomina'    => $idNomina,
                 'id_carga'     => $idCarga,
-                'nombre_carga' => $nombreCarga, // para que el frontend confirme qué zona detectó
+                'nombre_carga' => $nombreCarga,
+                'etiqueta'     => $etiqueta,
                 'total'        => count($filas),
                 'chunk_size'   => self::CHUNK_SIZE_DEFAULT,
             ],
@@ -2307,10 +2444,11 @@ class NominaFatigaController extends ResourceController
             return $this->respond(['status' => 'error', 'message' => 'Debes subir un archivo .xlsm válido'], 400);
         }
 
-        $idNominaExistente = (int)($this->request->getVar('id_nomina') ?? 0); // NUEVO
+        $idNominaExistente = (int)($this->request->getVar('id_nomina') ?? 0);
         $nombre        = trim($this->request->getVar('nombre') ?? 'Nómina ' . date('Y-m-d H:i'));
         $periodoInicio = $this->request->getVar('periodo_inicio') ?: null;
         $periodoFin    = $this->request->getVar('periodo_fin') ?: null;
+        $etiqueta      = trim((string)($this->request->getVar('etiqueta') ?? '')) ?: null; // NUEVO -- etiqueta
 
         $tmpPath = WRITEPATH . 'uploads/' . $archivo->getRandomName();
         $archivo->move(WRITEPATH . 'uploads', basename($tmpPath));
@@ -2416,10 +2554,10 @@ class NominaFatigaController extends ResourceController
             ], true);
         }
 
-        // ✅ AHORA — insert() sin segundo argumento, luego insertID() por separado
         $db->table('nomina_fatiga_cargas')->insert([
             'id_nomina'        => $idNomina,
             'nombre_carga'     => $nombreCarga,
+            'etiqueta'         => $etiqueta, // NUEVO -- etiqueta
             'id_zona'          => $idZonaCarga,
             'id_cliente'       => $idClienteCarga,
             'id_empresa'       => $idEmpresaCarga,
@@ -2440,7 +2578,7 @@ class NominaFatigaController extends ResourceController
         foreach ($filasAsistencia as $fila) {
             $batch[] = [
                 'id_nomina'         => $idNomina,
-                'id_carga'          => $idCarga, // NUEVO
+                'id_carga'          => $idCarga,
                 'id_empleado'       => null,
                 'curp_excel'        => '',
                 'nombre_excel'      => $fila['nombre'] ?? '',
@@ -2480,9 +2618,10 @@ class NominaFatigaController extends ResourceController
                     'id_nomina'    => $idNomina,
                     'id_carga'     => $idCarga,
                     'nombre_carga' => $nombreCarga,
+                    'etiqueta'     => $etiqueta,
                     'total'        => count($filasAsistencia),
                     'chunk_size'   => self::CHUNK_SIZE_DEFAULT,
-                    'omitidas'     => $omitidasReporte,   
+                    'omitidas'     => $omitidasReporte,
                 ],
             ],
         ], 201);
@@ -2497,6 +2636,38 @@ class NominaFatigaController extends ResourceController
      *
      * Reemplaza el método completo por este.
      */
+    private array $cacheCatalogos = [];
+
+    private function resolverIdCatalogo(\CodeIgniter\Database\BaseConnection $db, int $idCatalogo, ?string $textoExcel): ?int
+    {
+        $texto = trim((string)$textoExcel);
+        if ($texto === '') return null;
+
+        if (!isset($this->cacheCatalogos[$idCatalogo])) {
+            $rows = $db->query(
+                "SELECT id, valor FROM multicatalogo WHERE id_catalogo = ? AND status = 1",
+                [$idCatalogo]
+            )->getResultArray();
+
+            $mapa = [];
+            foreach ($rows as $r) {
+                $mapa[strtoupper(trim($r['valor']))] = (int)$r['id'];
+            }
+            $this->cacheCatalogos[$idCatalogo] = $mapa;
+        }
+
+        return $this->cacheCatalogos[$idCatalogo][strtoupper($texto)] ?? null;
+    }
+
+    /** ID directo si la celda ya trae un número; si no, resuelve por texto. */
+    private function idONull($valorIdCelda, \CodeIgniter\Database\BaseConnection $db, int $idCatalogo, $valorTextoCelda): ?int
+    {
+        if (is_numeric($valorIdCelda) && (int)$valorIdCelda > 0) {
+            return (int)$valorIdCelda;
+        }
+        return $this->resolverIdCatalogo($db, $idCatalogo, (string)($valorTextoCelda ?? ''));
+    }
+
     private function procesarHojaAltas(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet, object $actor): array
     {
         $sheet = $spreadsheet->getSheetByName('Altas');
@@ -2517,18 +2688,30 @@ class NominaFatigaController extends ResourceController
         };
 
         $colSalarioMensual = null;
+        $colModo = null;
         $maxCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
-        for ($c = 1; $c <= $maxCol; $c++) {
-            $header = trim((string)($sheet->getCell([$c, 1])->getValue() ?? ''));
-            if (strcasecmp($header, 'salario_mensual') === 0) {
-                $colSalarioMensual = $c;
-                break;
+
+        $maxFilaHeaderBusqueda = 3;
+        for ($filaHeader = 1; $filaHeader <= $maxFilaHeaderBusqueda; $filaHeader++) {
+            for ($c = 1; $c <= $maxCol; $c++) {
+                $header = trim((string)($sheet->getCell([$c, $filaHeader])->getValue() ?? ''));
+                if ($header === '') continue;
+
+                if ($colSalarioMensual === null && (
+                    strcasecmp($header, 'salario_mensual') === 0
+                    || strcasecmp($header, 'sueldo') === 0
+                    || strcasecmp($header, 'salario') === 0
+                )) {
+                    $colSalarioMensual = $c;
+                }
+                if ($colModo === null && strcasecmp($header, 'modo') === 0) {
+                    $colModo = $c;
+                }
             }
         }
 
         $db = \Config\Database::connect();
 
-        // ── PASO 1: lee TODAS las filas a memoria ──────────────────────────
         $filasLeidas = [];
         for ($r = 2; $r <= $sheet->getHighestRow(); $r++) {
             $nombre = trim((string)($leer(1, $r) ?? ''));
@@ -2555,18 +2738,34 @@ class NominaFatigaController extends ResourceController
                 if ($ts !== false) $fecha = date('Y-m-d', $ts);
             }
 
-            $idEscolaridad = (int)($leer(10, $r) ?: 0) ?: null;
-            $idTipoSangre  = (int)($leer(12, $r) ?: 0) ?: null;
-            $idParentesco  = (int)($leer(16, $r) ?: 0) ?: null;
-            $idTurno       = (int)($leer(18, $r) ?: 0) ?: null;
-            $idPuesto      = (int)($leer(20, $r) ?: 0) ?: null;
-            $idPeriocidad  = (int)($leer(22, $r) ?: 0) ?: null;
+            // Columnas: 9=Escolaridad(texto) 10=id_escolaridad 11=Tipo_sangre(texto)
+            // 12=id_tiposangre 15=Parentesco(texto) 16=id_parentesco 17=Turno(texto)
+            // 18=id_turno 19=Puesto(texto) 20=id_puesto 21=Periodicidad(texto) 22=id_periodicidad
+            $idEscolaridad = $this->idONull($leer(10, $r), $db, 1, $leer(9, $r));
+            $idTipoSangre  = $this->idONull($leer(12, $r), $db, 3, $leer(11, $r));
+            $idTurno       = $this->idONull($leer(18, $r), $db, 7, $leer(17, $r));
+            $idPeriocidad  = $this->idONull($leer(22, $r), $db, 9, $leer(21, $r));
+            $idPuesto      = $this->idONull($leer(20, $r), $db, 10, $leer(19, $r));
+            $idParentesco  = $this->idONull($leer(16, $r), $db, 17, $leer(15, $r));
 
             $salarioMensual = null;
             if ($colSalarioMensual !== null) {
                 $val = $leer($colSalarioMensual, $r);
+                if (is_string($val)) {
+                    $val = trim(str_replace(['$', ',', ' '], '', $val));
+                }
                 if (is_numeric($val) && (float)$val > 0) {
-                    $salarioMensual = round(((float)$val) * 2, 2); // capturan quincenal -- mensual = quincenal × 2
+                    $salarioMensual = round(((float)$val) * 2, 2);
+                }
+            }
+
+            $modoExplicito = null;
+            if ($colModo !== null) {
+                $modoRaw = strtoupper(trim((string)($leer($colModo, $r) ?? '')));
+                if (str_contains($modoRaw, 'SALARIO')) {
+                    $modoExplicito = 'salario';
+                } elseif (str_contains($modoRaw, 'TABULADOR')) {
+                    $modoExplicito = 'tabulador';
                 }
             }
 
@@ -2594,7 +2793,7 @@ class NominaFatigaController extends ResourceController
                 'parentesco' => $idParentesco, 'id_turno' => $idTurno, 'id_puesto' => $idPuesto,
                 'id_periocidad' => $idPeriocidad, 'fecha_ingreso' => $fecha, 'fecha_efectiva' => $fecha,
                 'clave_interbancaria' => $clabe ?: null, 'id_banco' => $idBanco,
-                'modo_sueldo' => $salarioMensual !== null ? 'salario' : null,
+                'modo_sueldo' => $modoExplicito ?? ($salarioMensual !== null ? 'salario' : null),
                 'salario_mensual' => $salarioMensual,
             ];
         }
@@ -2603,7 +2802,6 @@ class NominaFatigaController extends ResourceController
             return ['procesadas' => 0, 'omitidas' => 0];
         }
 
-        // ── PASO 2: bulk-fetch de CURPs Y RFCs que ya existen ──────────────
         $curpsUnicos = array_unique(array_column($filasLeidas, 'curp'));
         $rfcsUnicos  = array_unique(array_filter(array_column($filasLeidas, 'rfc')));
 
@@ -2626,57 +2824,74 @@ class NominaFatigaController extends ResourceController
         $procesadas = 0;
         $insertadas = 0;
         $actualizadasPorCurp = 0;
-        $actualizadasPorRfc  = 0; // -- estas son las que además corrigen CURP
+        $actualizadasPorRfc  = 0;
         $batchInsert = [];
-
-        $db->transStart();
+        $errores = [];
+        $debug = [];
 
         foreach ($filasLeidas as $fila) {
             $curp = $fila['curp'];
             $rfc  = $fila['rfc'];
 
-            if (isset($existentesPorCurp[$curp])) {
-                // ── Nivel 1: match por CURP -- UPDATE normal, CURP no se toca ──
-                $set = [];
-                foreach ($fila as $campo => $valor) {
-                    if ($campo === 'curp') continue;
-                    if ($campo === 'clave_interbancaria') continue; // se agrega aparte, siempre
-                    if ($valor === null) continue;
-                    $set[$campo] = $valor;
+            try {
+                if (isset($existentesPorCurp[$curp])) {
+                    $set = $fila;
+                    unset($set['curp'], $set['rfc']);
+
+                    $idDestino = $existentesPorCurp[$curp];
+                    $ok = $db->table('empleados')->where('id', $idDestino)->update($set);
+                    $afectadas = $db->affectedRows();
+
+                    if ($ok === false) {
+                        throw new \RuntimeException('update() devolvió false: ' . implode(' | ', $db->error()));
+                    }
+
+                    $debug[] = [
+                        'curp' => $curp, 'accion' => 'actualizar_por_curp', 'id_destino' => $idDestino,
+                        'filas_afectadas_mysql' => $afectadas,
+                        'set_enviado' => $set,
+                    ];
+                    $actualizadasPorCurp++;
+
+                } elseif ($rfc && isset($existentesPorRfc[$rfc])) {
+                    $set = $fila;
+                    unset($set['curp'], $set['rfc']);
+
+                    $idDestino = $existentesPorRfc[$rfc];
+                    $ok = $db->table('empleados')->where('id', $idDestino)->update($set);
+                    $afectadas = $db->affectedRows();
+
+                    if ($ok === false) {
+                        throw new \RuntimeException('update() devolvió false: ' . implode(' | ', $db->error()));
+                    }
+
+                    $debug[] = [
+                        'curp' => $curp, 'accion' => 'actualizar_por_rfc', 'id_destino' => $idDestino,
+                        'filas_afectadas_mysql' => $afectadas,
+                        'set_enviado' => $set,
+                    ];
+                    $actualizadasPorRfc++;
+
+                } else {
+                    $batchInsert[] = array_merge($fila, [
+                        'estatus' => 1,
+                        'acceso_biometrico' => 1,
+                        'created_by' => (int)$actor->id,
+                        'modo_sueldo' => $fila['modo_sueldo'] ?? 'tabulador',
+                        'fecha_ingreso' => $fila['fecha_ingreso'] ?? date('Y-m-d'),
+                        'fecha_efectiva' => $fila['fecha_efectiva'] ?? date('Y-m-d'),
+                    ]);
+                    $debug[] = ['curp' => $curp, 'accion' => 'sin_match_va_a_insert'];
+                    $insertadas++;
                 }
-                $set['clave_interbancaria'] = $fila['clave_interbancaria']; // siempre, sea NULL o con valor
-
-                $db->table('empleados')->where('id', $existentesPorCurp[$curp])->update($set);
-                $actualizadasPorCurp++;
-
-            } elseif ($rfc && isset($existentesPorRfc[$rfc])) {
-                // ── Nivel 2: no encontró por CURP, pero SÍ por RFC -- mismo
-                // empleado con CURP mal capturado antes. Se corrige TODO,
-                // incluyendo el CURP.
-                $idExistente = $existentesPorRfc[$rfc];
-                $set = [];
-                foreach ($fila as $campo => $valor) {
-                    if ($campo === 'clave_interbancaria') continue;
-                    if ($valor === null) continue;
-                    $set[$campo] = $valor; // 👈 aquí SÍ se incluye 'curp' si viene con dato
-                }
-                $set['clave_interbancaria'] = $fila['clave_interbancaria'];
-
-                $db->table('empleados')->where('id', $idExistente)->update($set);
-                $actualizadasPorRfc++;
-
-            } else {
-                // ── No existe ni por CURP ni por RFC -- INSERT nuevo ──
-                $batchInsert[] = array_merge($fila, [
-                    'estatus' => 1,
-                    'acceso_biometrico' => 1,
-                    'created_by' => (int)$actor->id,
-                    'modo_sueldo' => $fila['modo_sueldo'] ?? 'tabulador',
-                    'fecha_ingreso' => $fila['fecha_ingreso'] ?? date('Y-m-d'),
-                    'fecha_efectiva' => $fila['fecha_efectiva'] ?? date('Y-m-d'),
+            } catch (\Throwable $e) {
+                log_message('error', 'procesarHojaAltas() UPDATE falló para CURP={curp} RFC={rfc}: {msg}', [
+                    'curp' => $curp ?: '(sin curp)', 'rfc' => $rfc ?: '(sin rfc)', 'msg' => $e->getMessage(),
                 ]);
-                $insertadas++;
+                $errores[] = ['curp' => $curp, 'rfc' => $rfc, 'operacion' => 'update', 'mensaje' => $e->getMessage()];
+                $debug[] = ['curp' => $curp, 'accion' => 'ERROR', 'mensaje' => $e->getMessage()];
             }
+
             $procesadas++;
         }
 
@@ -2696,20 +2911,35 @@ class NominaFatigaController extends ResourceController
                         ")";
                 }, $chunk);
 
-                $db->query(
-                    "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,id_banco,estatus,acceso_biometrico,created_by,modo_sueldo,salario_mensual) VALUES " .
-                    implode(',', $valores)
-                );
+                try {
+                    $db->query(
+                        "INSERT IGNORE INTO empleados (nombre,paterno,materno,curp,rfc,nss,CP_fiscal,alergias,escolaridad,tipoSangre,telefonoEmergencia,nombreEmergencia,parentesco,id_turno,id_puesto,id_periocidad,fecha_ingreso,fecha_efectiva,clave_interbancaria,id_banco,estatus,acceso_biometrico,created_by,modo_sueldo,salario_mensual) VALUES " .
+                        implode(',', $valores)
+                    );
+
+                    $insertadasReales = $db->affectedRows();
+                    $esperadas = count($chunk);
+                    if ($insertadasReales < $esperadas) {
+                        $curpsChunk = array_column($chunk, 'curp');
+                        $errores[] = [
+                            'curp' => null, 'rfc' => null, 'operacion' => 'insert_ignorado',
+                            'mensaje' => ($esperadas - $insertadasReales) . " de {$esperadas} filas no se insertaron. CURPs: " . implode(', ', $curpsChunk),
+                        ];
+                    }
+                } catch (\Throwable $e) {
+                    log_message('error', 'procesarHojaAltas(): INSERT IGNORE de chunk falló: {msg}', ['msg' => $e->getMessage()]);
+                    $errores[] = ['curp' => null, 'rfc' => null, 'operacion' => 'insert_batch', 'mensaje' => $e->getMessage()];
+                }
             }
         }
-
-        $db->transComplete();
 
         return [
             'procesadas' => $procesadas,
             'insertadas' => $insertadas,
             'actualizadas_por_curp' => $actualizadasPorCurp,
-            'actualizadas_por_rfc'  => $actualizadasPorRfc, // corrigieron CURP
+            'actualizadas_por_rfc'  => $actualizadasPorRfc,
+            'errores' => $errores,
+            'debug' => $debug,
         ];
     }
 
@@ -2749,12 +2979,33 @@ class NominaFatigaController extends ResourceController
         return ['procesadas' => $procesadas, 'omitidas' => $omitidas];
     }
 
-    /* ── Extrae filas de Asistencia desde spreadsheet ya cargado ── */
+    /**
+     * Método completo, con el fix de "servicio" ya integrado (resuelto
+     * contra la tabla `servicios` por id_servicio, con el texto crudo del
+     * Excel nada más como respaldo). Reemplaza tu método completo por este.
+     *
+     * OJO -- esto NO trae el fix aparte de `dias_columnas` que te pasé antes
+     * (el que ordena los días reales del Excel para que el frontend no los
+     * reordene numéricamente). Tu return de aquí sigue igual que como lo
+     * pegaste: `['filas' => $filas, 'omitidas' => $omitidas]`. Si ya
+     * aplicaste ese otro fix en tu copia real, agrégale
+     * `'dias_columnas' => array_keys($diaCols)` al return de abajo antes de
+     * pegar esto. Si no lo has aplicado, dime y te mando el método completo
+     * con AMBOS fixes juntos.
+     *
+     * ── AGREGADO -- columna "Ubicación" ────────────────────────────────
+     * Igual que "Comentarios": OPCIONAL. Si tu plantilla .xlsm ya trae una
+     * columna con el encabezado exacto "Ubicación" (o "Ubicacion", sin
+     * acento, por si el Excel se guardó sin él) en la hoja "Asistencia", se
+     * lee sola. Si no la tiene, no truena nada -- simplemente se manda null,
+     * igual que pasa hoy con Comentarios en plantillas viejas.
+     */
+    
     private function extraerFilasAsistenciaDesdeSpreadsheet(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
     {
         $sheet = $this->buscarHojaPorNombre($spreadsheet, 'Asistencia');
         if (!$sheet) return ['filas' => [], 'omitidas' => []];
-
+    
         $headerRow = null;
         $maxColCheck = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
         for ($r = 1; $r <= 5; $r++) {
@@ -2764,13 +3015,13 @@ class NominaFatigaController extends ResourceController
             }
         }
         if ($headerRow === null) return ['filas' => [], 'omitidas' => []];
-
+    
         $headers = [];
         for ($c = 1; $c <= $maxColCheck; $c++) {
             $v = trim((string)$sheet->getCell([$c, $headerRow])->getValue());
             if ($v !== '') $headers[$v] = $c;
         }
-
+    
         $colNombre    = $headers['Nombre Completo'] ?? null;
         $colIdEmp     = $headers['ID_Empleado'] ?? null;
         $colServicio  = $headers['Servicio'] ?? null;
@@ -2778,7 +3029,7 @@ class NominaFatigaController extends ResourceController
         $colAdicional = $headers['Adicional'] ?? null;
         $colOtrosDesc = $headers['Otros Descuento'] ?? null;
         $colComents   = $headers['Comentarios'] ?? null;
-
+    
         $columnasRequeridas = [
             'Nombre Completo' => $colNombre,
             'ID_Empleado'      => $colIdEmp,
@@ -2794,71 +3045,88 @@ class NominaFatigaController extends ResourceController
                 '. Headers encontrados: ' . implode(', ', array_keys($headers))
             );
         }
-
+    
         $diaCols = [];
         foreach ($headers as $label => $col) {
             if (is_numeric($label) && $colIdServ && $colAdicional && $col > $colIdServ && $col < $colAdicional) {
                 $diaCols[(int)$label] = $col;
             }
         }
-
+    
         $filas = [];
-        $omitidas = []; // 👈 NUEVO -- [fila, motivo, nombre]
+        $omitidas = [];
         $leer  = fn($col, $r) => trim((string)($sheet->getCell([$col, $r])->getValue() ?? ''));
-
+    
+        /** Lee una celda que puede venir vacía, con un número válido, o con un
+         *  error de fórmula (#N/D, #N/A, #REF!, #VALUE!, etc.). Regresa el int
+         *  si es válido, o null si no lo es -- nunca lanza excepción. */
+        $leerIdONull = function (int $col, int $r) use ($sheet): ?int {
+            $v = $sheet->getCell([$col, $r])->getValue();
+            if (is_string($v) && str_starts_with(trim($v), '=')) {
+                $v = $sheet->getCell([$col, $r])->getOldCalculatedValue();
+            }
+            if ($v === null || $v === '' || $v === ' ') return null;
+            $vTexto = trim((string)$v);
+            if (str_starts_with($vTexto, '#')) return null; // #N/D, #N/A, #REF!, #VALUE!, etc.
+            if (!is_numeric($vTexto)) return null;
+            return (int)$vTexto;
+        };
+    
         for ($r = $headerRow + 1; $r <= $sheet->getHighestRow(); $r++) {
             $nombreDeLaFila = $colNombre ? $leer($colNombre, $r) : '';
-
-            $idEmpRaw = $sheet->getCell([$colIdEmp, $r])->getValue();
-            if (is_string($idEmpRaw) && str_starts_with(trim($idEmpRaw), '=')) {
-                $idEmpRaw = $sheet->getCell([$colIdEmp, $r])->getOldCalculatedValue();
-            }
-
-            // Fila completamente vacía (sin nombre ni id) -- se ignora sin reportar,
-            // es normal que el Excel tenga filas de relleno al final.
-            if ($idEmpRaw === null || $idEmpRaw === '' || $idEmpRaw === ' ') {
-                if ($nombreDeLaFila === '') continue; // vacía de verdad, no se reporta
-                $omitidas[] = ['fila' => $r, 'nombre' => $nombreDeLaFila, 'motivo' => 'ID_Empleado vacío'];
+            $idEmpLimpio = $leerIdONull($colIdEmp, $r);
+    
+            // Fila completamente vacía (sin nombre ni id) -- de relleno, se
+            // ignora sin reportar, es normal que el Excel tenga filas así.
+            if ($idEmpLimpio === null && $nombreDeLaFila === '') {
                 continue;
             }
-
-            if (!is_numeric(trim((string)$idEmpRaw))) {
-                $omitidas[] = ['fila' => $r, 'nombre' => $nombreDeLaFila, 'motivo' => "ID_Empleado no es numérico ({$idEmpRaw})"];
-                continue;
+    
+            // ID_Empleado vacío o inválido pero SÍ hay nombre -- YA NO se
+            // descarta. Se manda con id_empleado=0 para que el match por
+            // nombre (más abajo) la intente igual. Se deja constancia en
+            // $omitidas solo para que lo veas en el reporte, no para bloquear
+            // el procesamiento.
+            if ($idEmpLimpio === null) {
+                $valorCrudo = $sheet->getCell([$colIdEmp, $r])->getValue();
+                $omitidas[] = [
+                    'fila' => $r, 'nombre' => $nombreDeLaFila,
+                    'motivo' => 'ID_Empleado vacío o inválido (' . ($valorCrudo ?? 'vacío') . ') -- se intentará match por nombre',
+                ];
+                $idEmpLimpio = 0;
             }
-
-            $idServRaw = $sheet->getCell([$colIdServ, $r])->getValue();
-            if (is_string($idServRaw) && str_starts_with(trim($idServRaw), '=')) {
-                $idServRaw = $sheet->getCell([$colIdServ, $r])->getOldCalculatedValue();
-            }
-
+    
+            $idServLimpio = $leerIdONull($colIdServ, $r) ?? 0;
+    
             $dias = [];
             foreach ($diaCols as $num => $col) {
                 $v = $leer($col, $r);
                 if ($v !== '') $dias[$num] = strtoupper($v);
             }
-
+    
             $filas[] = [
                 'nombre'           => $nombreDeLaFila,
-                'id_empleado'      => (int)$idEmpRaw,
+                'id_empleado'      => $idEmpLimpio,
                 'servicio'         => $leer($colServicio, $r),
-                'id_servicio'      => (int)$idServRaw,
+                'id_servicio'      => $idServLimpio,
                 'dias'             => $dias,
                 'adicional'        => (float)($leer($colAdicional, $r) ?: 0),
                 'otros_descuentos' => (float)($leer($colOtrosDesc, $r) ?: 0),
                 'comentarios'      => $colComents ? $leer($colComents, $r) : null,
             ];
         }
-
-        // ── Match por nombre para empleados nuevos (id_empleado=0) ─────
+    
+        // ── Match por nombre para empleados sin ID válido (id_empleado=0) ──
+        // Ahora sí le llegan TODAS las filas con ID vacío/#N/D, no solo las
+        // que alguien escribió como 0 a mano.
         $sinId = array_filter($filas, fn($f) => ($f['id_empleado'] ?? 0) === 0 && !empty($f['nombre']));
-
+    
         if ($sinId) {
             $db = \Config\Database::connect();
-
+    
             $nombresUnicos = array_unique(array_column(array_values($sinId), 'nombre'));
             $placeholders  = implode(',', array_fill(0, count($nombresUnicos), '?'));
-
+    
             $matchPorNombre = [];
             if ($placeholders) {
                 $rows = $db->query("
@@ -2871,7 +3139,7 @@ class NominaFatigaController extends ResourceController
                     $matchPorNombre[strtoupper(trim($r['nombre_completo']))] = (int)$r['id'];
                 }
             }
-
+    
             foreach ($filas as &$fila) {
                 if (($fila['id_empleado'] ?? 0) === 0 && !empty($fila['nombre'])) {
                     $nombreNorm = strtoupper(trim($fila['nombre']));
@@ -2882,7 +3150,15 @@ class NominaFatigaController extends ResourceController
             }
             unset($fila);
         }
-
+    
+        // OJO -- ya NO se resuelve "servicio" contra el catálogo `servicios`
+        // por id_servicio. Decidiste que el campo abierto se llene con el
+        // texto CRUDO tal cual viene en la columna "Servicio" del Excel (el
+        // que ya se leyó arriba, en el armado de $filas), sin que se
+        // sobreescriba con el nombre del catálogo. id_servicio se sigue
+        // leyendo y mandando (guardarFilasAsistencia lo usa para resolver la
+        // zona del tabulador al calcular), nada más ya no pisa el texto.
+    
         return ['filas' => $filas, 'omitidas' => $omitidas];
     }
 
@@ -3373,5 +3649,333 @@ class NominaFatigaController extends ResourceController
             ->setBody($content);
     }
     
-    
+
+        
+    /**
+     * POST /api/v1/nomina-fatiga/preview-xlsm
+     * Body (multipart): archivo=xlsm/xlsx
+     *
+     * SOLO LEE -- no inserta, no actualiza, no borra nada en la BD.
+     * Regresa las 3 hojas (Altas/Bajas/Asistencia) ya parseadas para que el
+     * frontend las muestre en el preview antes de que el usuario confirme
+     * con "Confirmar y guardar en BD" (que sí llama a procesar-xlsm, el que
+     * ya tienes y sí escribe).
+     */
+    public function previewXlsm(): mixed
+    {
+        $archivo = $this->request->getFile('archivo');
+        if (!$archivo || !$archivo->isValid()) {
+            return $this->respond(['status' => 'error', 'message' => 'Debes subir un archivo .xlsm/.xlsx válido'], 400);
+        }
+
+        $tmpPath = WRITEPATH . 'uploads/' . $archivo->getRandomName();
+        $archivo->move(WRITEPATH . 'uploads', basename($tmpPath));
+
+        try {
+            $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($tmpPath);
+            $nombresReales = $reader->listWorksheetNames($tmpPath);
+            $buscadas = ['altas', 'bajas', 'asistencia'];
+            $hojasAEncontrar = [];
+            foreach ($nombresReales as $nombreReal) {
+                if (in_array(strtolower(trim($nombreReal)), $buscadas, true)) {
+                    $hojasAEncontrar[] = $nombreReal;
+                }
+            }
+            if (empty($hojasAEncontrar)) {
+                @unlink($tmpPath);
+                return $this->respond([
+                    'status'  => 'error',
+                    'message' => 'El archivo no contiene ninguna hoja llamada Altas, Bajas o Asistencia. '
+                            . 'Hojas encontradas: ' . implode(', ', $nombresReales),
+                ], 422);
+            }
+            $reader->setLoadSheetsOnly($hojasAEncontrar);
+            $reader->setReadDataOnly(true);
+            $spreadsheet = $reader->load($tmpPath);
+        } catch (\Throwable $e) {
+            @unlink($tmpPath);
+            return $this->respond(['status' => 'error', 'message' => 'Error leyendo el archivo: ' . $e->getMessage()], 422);
+        }
+
+        $altas = $this->leerHojaAltasPreview($spreadsheet);
+        $bajas = $this->leerHojaBajasPreview($spreadsheet);
+
+        try {
+            // Reusa TAL CUAL el método que ya tienes y que usa procesarXlsm() --
+            // ya es de solo lectura (no escribe nada), así que sirve igual aquí.
+            $resultadoLectura = $this->extraerFilasAsistenciaDesdeSpreadsheet($spreadsheet);
+            $asistencia       = $resultadoLectura['filas'];
+            $omitidas         = $resultadoLectura['omitidas'];
+            // dias_columnas requiere el cambio de 1 línea explicado arriba en
+            // extraerFilasAsistenciaDesdeSpreadsheet() -- si aún no lo pegas,
+            // esta llave simplemente no viene y el frontend cae a su propio
+            // fallback (fecha de inicio del periodo, o 1..N), así que no truena.
+            $diasColumnas     = $resultadoLectura['dias_columnas'] ?? [];
+        } catch (\Throwable $e) {
+            @unlink($tmpPath);
+            return $this->respond(['status' => 'error', 'message' => 'Error leyendo Asistencia: ' . $e->getMessage()], 422);
+        }
+
+        @unlink($tmpPath);
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => [
+                'altas'         => $altas,
+                'bajas'         => $bajas,
+                'asistencia'    => $asistencia,
+                'omitidas'      => $omitidas,
+                'dias_columnas' => $diasColumnas, // ej. [28,29,30,1,2,3,4,5,6,7,8,9,10,11,12]
+            ],
+        ]);
+    }
+
+    /**
+     * Lee la hoja "Altas" para PREVIEW -- misma lectura de columnas que
+     * procesarHojaAltas() (nombre=1, paterno=2, materno=3, curp=4, turno
+     * texto=17, puesto texto=19, SUELDO=detectado por header en las
+     * primeras 3 filas, igual que el método real), pero:
+     *   - No hace INSERT ni UPDATE en `empleados`.
+     *   - Solo hace 1 SELECT por fila para saber si la CURP ya existe, y así
+     *     poder marcar accion='actualizar' (existe, se va a planchar) o
+     *     accion='nuevo' (no existe, se va a insertar) quansdo el usuario
+     *     confirme -- exactamente el mismo criterio que usa
+     *     procesarHojaAltas() de verdad (match por CURP primero).
+     *   - El salario ya viene ×2 (mismo cálculo que procesarHojaAltas():
+     *     round($val * 2, 2)) para que el número que ves en el preview sea
+     *     EXACTAMENTE el que se va a guardar si confirmas.
+     */
+    private function leerHojaAltasPreview(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
+    {
+        $sheet = $spreadsheet->getSheetByName('Altas');
+        if (!$sheet) return [];
+
+        $leer = function (int $col, int $row) use ($sheet) {
+            $v = $sheet->getCell([$col, $row])->getValue();
+            if (is_string($v) && str_starts_with(trim($v), '=')) {
+                $v = $sheet->getCell([$col, $row])->getOldCalculatedValue();
+            }
+            return $v;
+        };
+
+        // Detecta la columna de salario por HEADER, en las primeras 3 filas --
+        // idéntico a como lo hace procesarHojaAltas() de verdad.
+        $colSalarioMensual = null;
+        $maxCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
+        for ($filaHeader = 1; $filaHeader <= 3; $filaHeader++) {
+            for ($c = 1; $c <= $maxCol; $c++) {
+                $header = trim((string)($sheet->getCell([$c, $filaHeader])->getValue() ?? ''));
+                if ($header === '') continue;
+                if ($colSalarioMensual === null && (
+                    strcasecmp($header, 'salario_mensual') === 0
+                    || strcasecmp($header, 'sueldo') === 0
+                    || strcasecmp($header, 'salario') === 0
+                )) {
+                    $colSalarioMensual = $c;
+                }
+            }
+        }
+
+        $db = \Config\Database::connect();
+        $filas = [];
+
+        for ($r = 2; $r <= $sheet->getHighestRow(); $r++) {
+            $nombre = trim((string)($leer(1, $r) ?? ''));
+            $curp   = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', (string)($leer(4, $r) ?? '')));
+            if (!$nombre || !$curp) continue; // misma validación mínima que procesarHojaAltas()
+
+            $paterno = trim((string)($leer(2, $r) ?? ''));
+            $materno = trim((string)($leer(3, $r) ?? ''));
+
+            $salarioMensual = null;
+            if ($colSalarioMensual !== null) {
+                $val = $leer($colSalarioMensual, $r);
+                if (is_string($val)) {
+                    $val = trim(str_replace(['$', ',', ' '], '', $val));
+                }
+                if (is_numeric($val) && (float)$val > 0) {
+                    $salarioMensual = round(((float)$val) * 2, 2);
+                }
+            }
+
+            // Único SELECT -- no escribe nada, solo sirve para el badge del preview
+            $existe = $db->query('SELECT id FROM empleados WHERE curp = ? LIMIT 1', [$curp])->getRowArray();
+
+            // Fecha_Alta (columna 23) -- mismo parseo que procesarHojaAltas() real
+            $fechaRaw = $leer(23, $r);
+            $fechaAlta = null;
+            if ($fechaRaw instanceof \DateTime) {
+                $fechaAlta = $fechaRaw->format('Y-m-d');
+            } elseif ($fechaRaw && is_numeric($fechaRaw) && $fechaRaw > 0 && $fechaRaw < 60000) {
+                try {
+                    $fechaAlta = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject($fechaRaw)->format('Y-m-d');
+                } catch (\Throwable $e) {
+                    $fechaAlta = null;
+                }
+            } elseif (is_string($fechaRaw) && trim($fechaRaw) !== '') {
+                $ts = strtotime($fechaRaw);
+                if ($ts !== false) $fechaAlta = date('Y-m-d', $ts);
+            }
+
+            // Todas las columnas del template -- para que se puedan ver y
+            // corregir en el preview, no solo las 6 que se mostraban antes.
+            $filas[] = [
+                'curp'                 => $curp,
+                'nombre'               => $nombre,
+                'paterno'              => $paterno,
+                'materno'              => $materno,
+                'rfc'                  => strtoupper(trim((string)($leer(5, $r) ?? ''))),
+                'nss'                  => trim((string)($leer(6, $r) ?? '')),
+                'cp_fiscal'            => trim((string)($leer(7, $r) ?? '')),
+                'alergia'              => trim((string)($leer(8, $r) ?? '')),
+                '_texto_escolaridad'   => trim((string)($leer(9, $r) ?? '')),
+                '_texto_tipo_sangre'   => trim((string)($leer(11, $r) ?? '')),
+                'telefono_emergencia'  => trim((string)($leer(13, $r) ?? '')),
+                'nombre_emergencia'    => trim((string)($leer(14, $r) ?? '')),
+                '_texto_parentesco'    => trim((string)($leer(15, $r) ?? '')),
+                '_texto_turno'         => trim((string)($leer(17, $r) ?? '')),
+                '_texto_puesto'        => trim((string)($leer(19, $r) ?? '')),
+                '_texto_periodicidad'  => trim((string)($leer(21, $r) ?? '')),
+                'fecha_alta'           => $fechaAlta,
+                'clabe_interbancaria'  => trim((string)($leer(24, $r) ?? '')),
+                'modo'                 => trim((string)($leer(27, $r) ?? '')),
+                'salario_mensual'      => $salarioMensual,
+                'accion'               => $existe ? 'actualizar' : 'nuevo',
+            ];
+        }
+
+        return $filas;
+    }
+
+    /**
+     * Lee la hoja "Bajas" para PREVIEW -- mismas columnas que
+     * procesarHojaBajas() (col2=Numero_Empleado, col3=Fecha_Efectiva), más
+     * col1=Nombre Completo y col6=Motivo_Baja solo para mostrar en pantalla.
+     * No hace ningún UPDATE sobre `empleados`.
+     */
+    private function leerHojaBajasPreview(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
+    {
+        $sheet = $spreadsheet->getSheetByName('Bajas');
+        if (!$sheet) return [];
+
+        $filas = [];
+        for ($r = 2; $r <= $sheet->getHighestRow(); $r++) {
+            $idEmp  = (int)($sheet->getCell([2, $r])->getValue() ?: 0);
+            $nombre = trim((string)($sheet->getCell([1, $r])->getValue() ?? ''));
+
+            if (!$idEmp && $nombre === '') continue; // fila vacía / de relleno
+
+            $fechaRaw = $sheet->getCell([3, $r])->getValue();
+            $fecha = null;
+            if ($fechaRaw instanceof \DateTime) {
+                $fecha = $fechaRaw->format('Y-m-d');
+            } elseif ($fechaRaw && is_numeric($fechaRaw)) {
+                try {
+                    $fecha = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject($fechaRaw)->format('Y-m-d');
+                } catch (\Throwable $e) {
+                    $fecha = null;
+                }
+            }
+
+            $motivo = trim((string)($sheet->getCell([6, $r])->getValue() ?? ''));
+
+            $filas[] = [
+                'nombre'          => $nombre,
+                'numero_empleado' => $idEmp,
+                'fecha_efectiva'  => $fecha,
+                'motivo_baja'     => $motivo,
+            ];
+        }
+
+        return $filas;
+    }    
+
+    /**
+     * Nuevo endpoint para tu NominaFatigaController: quitar a un empleado de
+     * una nómina YA PROCESADA (borra su fila de nomina_fatiga_detalle) y
+     * resta su total del total_pagar/total_empleados del lote -- para el
+     * caso real que describiste: en la nómina Politécnico unos wueyes se
+     * cargaron mal y quieres quitarlos para volver a capturarlos correctos.
+     *
+     * "Quitar" aquí = quitarlo del CÁLCULO de esta nómina (lo que confirmaste
+     * antes), NO es baja del empleado en la empresa -- eso ya lo tienes en
+     * /empleados/{id}/baja y es un endpoint totalmente distinto.
+     *
+     * Solo funciona mientras la nómina sigue en 'borrador'. Una vez aprobada
+     * o dispersada, el backend lo bloquea (no solo el botón del frontend,
+     * que ya se oculta, pero por si alguien pega la petición directo).
+     *
+     * Después de quitarlo, en tu vista de captura (FatigaCapturaView) eliges
+     * "Agregar a lote existente" con esta misma nómina y la persona corregida
+     * entra en una carga nueva dentro del mismo lote -- guardarFilasAsistencia()
+     * ya suma en vez de sobreescribir cuando $idNominaExistente viene.
+     *
+     * Ruta sugerida (va DENTRO del mismo group() con el filtro de auth que
+     * las demás rutas de nomina-fatiga):
+     *   $routes->delete('nomina-fatiga/detalle/(:num)', 'Api\V1\NominaFatigaController::quitarDetalle/$1');
+     */
+    public function quitarDetalle($idDetalle = null): mixed
+    {
+        $idDetalle = (int)$idDetalle;
+        if ($idDetalle <= 0) {
+            return $this->respond(['status' => 'error', 'message' => 'id inválido'], 400);
+        }
+
+        // Mismo patrón que ya usas en el resto del controller.
+        $actor = $this->request->jwtUser;
+        if (!$actor) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo identificar al usuario'], 401);
+        }
+
+        $db = \Config\Database::connect();
+
+        $fila = $db->table('nomina_fatiga_detalle')->where('id', $idDetalle)->get()->getRowArray();
+        if (!$fila) {
+            return $this->respond(['status' => 'error', 'message' => 'Ese registro ya no existe'], 404);
+        }
+
+        $nomina = $db->table('nomina_fatiga')->where('id', $fila['id_nomina'])->get()->getRowArray();
+        if (!$nomina) {
+            return $this->respond(['status' => 'error', 'message' => 'La nómina de este registro ya no existe'], 404);
+        }
+        if ($nomina['estatus'] !== 'borrador') {
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Esta nómina ya no está en borrador -- no se puede editar su detalle',
+            ], 409);
+        }
+
+        $db->transStart();
+
+        $db->table('nomina_fatiga_detalle')->where('id', $idDetalle)->delete();
+
+        // GREATEST(0, ...) nada más como candado -- no debería pasar de 0 en
+        // condiciones normales, pero evita que un total_pagar/total_empleados
+        // se vaya a negativo si algo más ya lo había tocado.
+        $db->table('nomina_fatiga')
+            ->set('total_pagar', 'GREATEST(0, total_pagar - ' . (float)$fila['total'] . ')', false)
+            ->set('total_empleados', 'GREATEST(0, total_empleados - 1)', false)
+            ->where('id', $fila['id_nomina'])
+            ->update();
+
+        $db->transComplete();
+
+        if ($db->transStatus() === false) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo quitar -- intenta de nuevo'], 500);
+        }
+
+        \App\Libraries\AuditLibrary::log(
+            (int)$actor->id,
+            'QUITAR_DETALLE_NOMINA_FATIGA',
+            'nomina_fatiga_detalle',
+            (string)$idDetalle,
+            "Quitó a '{$fila['nombre_excel']}' de la nómina #{$fila['id_nomina']} (total restado: {$fila['total']})"
+        );
+
+        return $this->respond([
+            'status'  => 'ok',
+            'message' => 'Empleado quitado de la nómina',
+            'data'    => ['id_nomina' => (int)$fila['id_nomina']],
+        ]);
+    }
 }

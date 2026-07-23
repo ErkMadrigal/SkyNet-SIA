@@ -66,6 +66,8 @@ $routes->group('api', function ($routes) {
 
             $routes->get('(:num)/dispersion-ias',    'Api\V1\NominaFatigaController::dispersionIas/$1',    ['filter' => 'jwt']);
             $routes->get('(:num)/dispersion-fiscal',  'Api\V1\NominaFatigaController::dispersionFiscal/$1',  ['filter' => 'jwt']);
+            $routes->post('preview-xlsm', 'Api\V1\NominaFatigaController::previewXlsm');
+            $routes->post('guardar-manual', 'Api\V1\NominaFatigaController::guardarAsistenciaManual');
     
         });
 
@@ -137,6 +139,7 @@ $routes->group('api', function ($routes) {
             $routes->post('qr/generar', 'Api\V1\BiometricoController::qrGenerar');
             $routes->post('qr/usar',    'Api\V1\BiometricoController::qrUsar');
             $routes->get('registros',   'Api\V1\BiometricoController::registros');
+            $routes->get('registros/exportar-xlsx', 'Api\V1\BiometricoController::exportarXlsx');
         });
 
         /* ─────────────────────────────────────────────────

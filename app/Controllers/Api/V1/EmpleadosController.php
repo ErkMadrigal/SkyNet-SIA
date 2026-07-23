@@ -493,7 +493,9 @@ class EmpleadosController extends ResourceController
             $salarioMensual = is_numeric($emp['salario_mensual'] ?? null) && (float)$emp['salario_mensual'] > 0
                 ? (float)$emp['salario_mensual']
                 : null;
-            $modoSueldo = $salarioMensual !== null ? 'salario' : 'tabulador';
+            $modoSueldo = in_array($emp['modo_sueldo'] ?? '', ['tabulador', 'salario'], true)
+                ? $emp['modo_sueldo']
+                : ($salarioMensual !== null ? 'salario' : 'tabulador');
 
             $valores[] = "('{$esc($nombre)}','{$esc($paterno)}','{$esc($materno)}'," .
                 "'{$esc($curp)}','{$esc($emp['rfc'] ?? '')}','{$esc($emp['nss'] ?? '')}'," .
