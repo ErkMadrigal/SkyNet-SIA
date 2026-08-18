@@ -353,4 +353,416 @@ class ImportacionMasivaController extends ResourceController
             implode(',', $valores)
         );
     }
+
+
+    public function altasXlsx(): mixed
+    {
+        @set_time_limit(300);
+        @ini_set('memory_limit', '1024M');
+
+        $actor = $this->request->jwtUser;
+        if (!$actor) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo identificar al usuario'], 401);
+        }
+
+        $origen    = trim((string)($this->request->getVar('origen') ?? '')) ?: null;
+        $idCliente = (int)($this->request->getVar('id_cliente') ?? 0);
+        if ($idCliente <= 0) $idCliente = 100; // default acordado para esta carga
+
+        // Id de lote -- lo genera el front (crypto.randomUUID()) una sola
+        // vez por sesión de envío y lo manda igual en cada archivo. Sirve
+        // para poder deshacer TODA la sesión con un solo DELETE si el
+        // usuario da "no" en el botón de confirmar/rollback.
+        $loteId = trim((string)($this->request->getVar('lote_id') ?? '')) ?: null;
+
+        // El usuario decide con un botón en el front si el sueldo que trae
+        // el xlsx es quincenal (se multiplica x2 para sacar salario_mensual)
+        // o ya viene mensual (se usa tal cual). Default = quincenal (x2)
+        // para no romper el comportamiento que ya tenías si el front viejo
+        // no manda este campo.
+        $duplicarSueldoRaw = $this->request->getVar('duplicar_sueldo');
+        $duplicarSueldo    = $duplicarSueldoRaw === null ? true : in_array((string)$duplicarSueldoRaw, ['1', 'true', 'on'], true);
+
+        // Acepta varios archivos (archivos[]) o uno solo (archivo) -- tu
+        // frontend manda uno por request (mismo patrón que ya usas en
+        // enviar()), pero se deja abierto por si algún día mandas varios
+        // juntos.
+        $archivos = $this->request->getFileMultiple('archivos') ?: [];
+        if (empty($archivos)) {
+            $unico = $this->request->getFile('archivo');
+            if ($unico && $unico->isValid()) $archivos = [$unico];
+        }
+        if (empty($archivos)) {
+            return $this->respond(['status' => 'error', 'message' => 'No se recibió ningún archivo'], 400);
+        }
+
+        $db = \Config\Database::connect();
+
+        $totalGlobal       = 0;
+        $insertadosGlobal  = 0;
+        $erroresGlobal     = 0;
+        $detalleGlobal     = [];
+        $resumenPorArchivo = [];
+
+        foreach ($archivos as $archivo) {
+            if (!$archivo || !$archivo->isValid()) {
+                $detalleGlobal[] = [
+                    'archivo' => $archivo?->getClientName() ?? '(desconocido)',
+                    'fila'    => '—',
+                    'mensaje' => 'Archivo inválido o corrupto',
+                ];
+                continue;
+            }
+
+            $nombreArchivo = $archivo->getClientName();
+            $tmpPath       = WRITEPATH . 'uploads/' . $archivo->getRandomName();
+            $archivo->move(WRITEPATH . 'uploads', basename($tmpPath));
+
+            $totalArchivo      = 0;
+            $insertadosArchivo = 0;
+            $erroresArchivo    = 0;
+
+            try {
+                $reader       = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($tmpPath);
+                $nombresHojas = $reader->listWorksheetNames($tmpPath);
+
+                $hojaAltas = null;
+                foreach ($nombresHojas as $h) {
+                    if (strcasecmp(trim($h), 'Altas') === 0) { $hojaAltas = $h; break; }
+                }
+                if (!$hojaAltas) {
+                    @unlink($tmpPath);
+                    $detalleGlobal[]    = ['archivo' => $nombreArchivo, 'fila' => '—', 'mensaje' => 'No se encontró la hoja "Altas" en este archivo'];
+                    $resumenPorArchivo[] = ['archivo' => $nombreArchivo, 'total' => 0, 'insertados' => 0, 'errores' => 1];
+                    continue;
+                }
+
+                $reader->setLoadSheetsOnly([$hojaAltas]);
+                $reader->setReadDataOnly(true);
+                $spreadsheet = $reader->load($tmpPath);
+                $sheet       = $spreadsheet->getSheetByName($hojaAltas);
+            } catch (\Throwable $e) {
+                @unlink($tmpPath);
+                $detalleGlobal[]    = ['archivo' => $nombreArchivo, 'fila' => '—', 'mensaje' => 'Error leyendo el archivo: ' . $e->getMessage()];
+                $resumenPorArchivo[] = ['archivo' => $nombreArchivo, 'total' => 0, 'insertados' => 0, 'errores' => 1];
+                continue;
+            }
+
+            // ── Fila de encabezados: busca "Nombre" -- se amplía a las
+            // primeras 60 filas (antes solo 5) porque algunas plantillas
+            // traen un bloque de filas OCULTAS con notas/instrucciones
+            // antes de la fila real de encabezados. PhpSpreadsheet lee el
+            // valor de una celda igual esté oculta o no la fila -- ocultar
+            // una fila es solo un atributo visual, no borra el dato -- así
+            // que esto no afecta la lectura de las filas de datos, solo
+            // había que ampliar dónde se busca el encabezado.
+            $maxCol       = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
+            $headerRow    = null;
+            $limiteHeader = min(60, $sheet->getHighestRow());
+            for ($r = 1; $r <= $limiteHeader; $r++) {
+                for ($c = 1; $c <= $maxCol; $c++) {
+                    $v = trim((string)($sheet->getCell([$c, $r])->getValue() ?? ''));
+                    if (strcasecmp($v, 'Nombre') === 0) { $headerRow = $r; break 2; }
+                }
+            }
+            if ($headerRow === null) {
+                @unlink($tmpPath);
+                $detalleGlobal[]    = ['archivo' => $nombreArchivo, 'fila' => '—', 'mensaje' => 'No se encontró la columna "Nombre" en las primeras filas de "Altas"'];
+                $resumenPorArchivo[] = ['archivo' => $nombreArchivo, 'total' => 0, 'insertados' => 0, 'errores' => 1];
+                continue;
+            }
+
+            // Headers normalizados (mayúsculas, sin espacios, sin acentos --
+            // mismo helper que ya usa ubicaciones()) para que dé igual si el
+            // xlsx trae "Sueldo", "SUELDO", "sueldo " o "Sueldo Quincenal".
+            $headers = [];
+            for ($c = 1; $c <= $maxCol; $c++) {
+                $v = trim((string)($sheet->getCell([$c, $headerRow])->getValue() ?? ''));
+                if ($v !== '') $headers[$this->normalizarHeader($v)] = $c;
+            }
+
+            // El sueldo puede venir como "SUELDO", "SUELDO QUINCENAL" o
+            // "SUELDO MENSUAL" (en cualquier combinación de mayúsculas/
+            // minúsculas/espacios -- ya normalizado arriba). Sea cual sea
+            // la columna que traiga el archivo, el x2 o no lo decide el
+            // botón del front ($duplicarSueldo), no el nombre de la columna.
+            $colSueldo = $headers['SUELDOMENSUAL'] ?? $headers['SUELDOQUINCENAL'] ?? $headers['SUELDO'] ?? null;
+
+            $leer = function ($col, $r) use ($sheet) {
+                if (!$col) return '';
+                return trim((string)($sheet->getCell([$col, $r])->getValue() ?? ''));
+            };
+
+            $batch      = [];
+            $highestRow = $sheet->getHighestRow();
+
+            for ($r = $headerRow + 1; $r <= $highestRow; $r++) {
+                // Fila totalmente vacía -- se ignora sin contar como error.
+                $filaVacia = true;
+                for ($c = 1; $c <= $maxCol; $c++) {
+                    if (trim((string)($sheet->getCell([$c, $r])->getValue() ?? '')) !== '') { $filaVacia = false; break; }
+                }
+                if ($filaVacia) continue;
+
+                $totalArchivo++;
+
+                $nombre = $leer($headers['NOMBRE'] ?? null, $r);
+                $rfc    = strtoupper($leer($headers['RFC'] ?? null, $r));
+
+                if ($nombre === '') {
+                    $motivo = $rfc === '' ? 'Sin nombre ni RFC' : 'Sin nombre';
+                    $detalleGlobal[] = ['archivo' => $nombreArchivo, 'fila' => $r, 'mensaje' => "Fila omitida: {$motivo}"];
+                    $erroresArchivo++;
+                    continue;
+                }
+
+                // salario_mensual = sueldo capturado x2 (si es quincenal) o
+                // tal cual (si ya es mensual) -- lo decide $duplicarSueldo,
+                // que viene del botón del front para todo el lote.
+                $sueldoRaw      = $colSueldo ? preg_replace('/[^\d.]/', '', $leer($colSueldo, $r)) : '';
+                $salarioMensual = $sueldoRaw !== '' ? round(((float)$sueldoRaw) * ($duplicarSueldo ? 2 : 1), 2) : null;
+
+                // Fecha_Alta -- puede venir como fecha real de Excel (numérica)
+                // o como texto ya formateado.
+                $fechaEfectiva = null;
+                $colFecha = $headers['FECHA_ALTA'] ?? null;
+                if ($colFecha) {
+                    $valorCelda = $sheet->getCell([$colFecha, $r])->getValue();
+                    if (is_numeric($valorCelda)) {
+                        try {
+                            $fechaEfectiva = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject($valorCelda)->format('Y-m-d');
+                        } catch (\Throwable $e) {
+                            $fechaEfectiva = null;
+                        }
+                    } else {
+                        $txt = trim((string)$valorCelda);
+                        $ts  = $txt !== '' ? strtotime($txt) : false;
+                        $fechaEfectiva = $ts ? date('Y-m-d', $ts) : null;
+                    }
+                }
+
+                $idOrNull = fn($v) => ((int)$v > 0) ? (int)$v : null;
+
+                $batch[] = [
+                    'nombre'                => $nombre,
+                    'paterno'               => $leer($headers['PATERNO'] ?? null, $r),
+                    'materno'               => $leer($headers['MATERNO'] ?? null, $r),
+                    // NULL en vez de '' cuando vienen vacíos -- si CURP/RFC/NSS
+                    // tienen algún índice UNIQUE en la tabla, dos filas con ''
+                    // chocan como si fueran duplicadas y tiran TODO el lote de
+                    // insertBatch sin avisar. NULL nunca choca contra NULL.
+                    'curp'                  => strtoupper($leer($headers['CURP'] ?? null, $r)) ?: null,
+                    'rfc'                   => $rfc !== '' ? $rfc : null,
+                    'nss'                   => $leer($headers['NSS'] ?? null, $r) ?: null,
+                    'CP_fiscal'             => $leer($headers['CP_FISCAL'] ?? null, $r),
+                    'alergias'              => $leer($headers['ALERGIA'] ?? null, $r) ?: 'N/A',
+                    'escolaridad'           => $idOrNull($leer($headers['ID_ESCOLARIDAD'] ?? null, $r)),
+                    'tipoSangre'            => $idOrNull($leer($headers['ID_TIPOSANGRE'] ?? null, $r)),
+                    'telefonoEmergencia'    => $leer($headers['TELEFONO_EMERGENCIA'] ?? null, $r),
+                    'nombreEmergencia'      => $leer($headers['NOMBRE_EMERGENCIA'] ?? null, $r),
+                    'parentesco'            => $idOrNull($leer($headers['ID_PARENTESCO'] ?? null, $r)),
+                    'id_turno'              => $idOrNull($leer($headers['ID_TURNO'] ?? null, $r)),
+                    'id_puesto'             => $idOrNull($leer($headers['ID_PUESTO'] ?? null, $r)),
+                    'id_periocidad'         => $idOrNull($leer($headers['ID_PERIODICIDAD'] ?? null, $r)),
+                    'fecha_efectiva'        => $fechaEfectiva,
+                    'clave_interbancaria'   => $leer($headers['CLABE_INTERBANCARIA'] ?? null, $r) ?: null,
+                    'salario_mensual'       => $salarioMensual,
+                    'modo_sueldo'           => 'salario',
+                    'id_cliente'            => $idCliente,
+                    'carga_masiva'          => 1,
+                    'origen_carga_temporal' => $origen,
+                    'lote_importacion'      => $loteId,
+                    'created_at'            => date('Y-m-d H:i:s'),
+                ];
+
+                if (count($batch) >= 500) {
+                    $insertadosArchivo += $this->insertarLoteAltas($db, $batch, $nombreArchivo, $detalleGlobal, $erroresArchivo);
+                    $batch = [];
+                }
+            }
+
+            if ($batch) {
+                $insertadosArchivo += $this->insertarLoteAltas($db, $batch, $nombreArchivo, $detalleGlobal, $erroresArchivo);
+            }
+
+            @unlink($tmpPath);
+
+            $resumenPorArchivo[] = [
+                'archivo'    => $nombreArchivo,
+                'total'      => $totalArchivo,
+                'insertados' => $insertadosArchivo,
+                'errores'    => $erroresArchivo,
+            ];
+
+            $totalGlobal      += $totalArchivo;
+            $insertadosGlobal += $insertadosArchivo;
+            $erroresGlobal    += $erroresArchivo;
+        }
+
+        \App\Libraries\AuditLibrary::log(
+            (int)$actor->id,
+            'CARGA_MASIVA_ALTAS',
+            'empleados',
+            null,
+            "Carga masiva de altas (origen: " . ($origen ?? 'sin especificar') . ") -- "
+                . count($archivos) . " archivo(s), {$insertadosGlobal} insertados, {$erroresGlobal} errores"
+        );
+
+        return $this->respond([
+            'status'      => 'ok',
+            'total'       => $totalGlobal,
+            'insertados'  => $insertadosGlobal,
+            'duplicados'  => 0, // a propósito no se hace match/dedup aquí -- ver conversación
+            'errores'     => $erroresGlobal,
+            'detalle'     => $detalleGlobal,
+            'por_archivo' => $resumenPorArchivo,
+        ]);
+    }
+
+    /**
+     * Inserta un lote de altas con fallback fila-por-fila.
+     *
+     * insertBatch() manda TODAS las filas del lote en una sola query --
+     * si UNA sola choca contra un UNIQUE (ej. dos filas con el mismo
+     * curp, o si dbDebug está apagado y falla en silencio), se pierden
+     * las 500 filas completas sin que nadie se entere. Aquí, si el
+     * batch completo falla, se reintenta insertando fila por fila para
+     * salvar las que sí sirven y reportar con precisión cuál y por qué
+     * falló cada una que no.
+     */
+    private function insertarLoteAltas($db, array $batch, string $nombreArchivo, array &$detalleGlobal, int &$erroresArchivo): int
+    {
+        try {
+            if ($db->table('empleados')->insertBatch($batch)) {
+                return count($batch);
+            }
+        } catch (\Throwable $e) {
+            // cae al modo fila-por-fila de abajo
+        }
+
+        $insertadosOk = 0;
+        foreach ($batch as $fila) {
+            try {
+                if ($db->table('empleados')->insert($fila)) {
+                    $insertadosOk++;
+                    continue;
+                }
+                $erroresArchivo++;
+                $detalleGlobal[] = [
+                    'archivo' => $nombreArchivo,
+                    'fila'    => '—',
+                    'mensaje' => "No se pudo insertar a \"{$fila['nombre']}\": " . ($db->error()['message'] ?? 'error desconocido'),
+                ];
+            } catch (\Throwable $e) {
+                $erroresArchivo++;
+                $detalleGlobal[] = [
+                    'archivo' => $nombreArchivo,
+                    'fila'    => '—',
+                    'mensaje' => "No se pudo insertar a \"{$fila['nombre']}\": " . $e->getMessage(),
+                ];
+            }
+        }
+
+        return $insertadosOk;
+    }
+
+    /**
+     * POST /api/v1/importacion-masiva/altas-xlsx/confirmar
+     * Body: lote_id
+     *
+     * No borra ni modifica nada -- los registros ya quedaron insertados
+     * desde altasXlsx(). Esto solo dejA constancia en el log de auditoría
+     * de que el usuario revisó el resultado y decidió quedarse con el
+     * lote (para trazabilidad/legal, igual que el resto del sistema).
+     */
+    public function confirmarLote(): mixed
+    {
+        $actor = $this->request->jwtUser;
+        if (!$actor) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo identificar al usuario'], 401);
+        }
+
+        $loteId = trim((string)($this->request->getVar('lote_id') ?? ''));
+        if ($loteId === '') {
+            return $this->respond(['status' => 'error', 'message' => 'Falta lote_id'], 400);
+        }
+
+        $db = \Config\Database::connect();
+        $count = $db->table('empleados')
+            ->where('lote_importacion', $loteId)
+            ->where('carga_masiva', 1)
+            ->countAllResults();
+
+        \App\Libraries\AuditLibrary::log(
+            (int)$actor->id,
+            'CARGA_MASIVA_ALTAS_CONFIRMADA',
+            'empleados',
+            null,
+            "Lote {$loteId} confirmado por el usuario -- {$count} empleados quedan definitivos"
+        );
+
+        return $this->respond([
+            'status'  => 'ok',
+            'message' => "Lote confirmado ({$count} empleados)",
+            'total'   => $count,
+        ]);
+    }
+
+    /**
+     * POST /api/v1/importacion-masiva/altas-xlsx/rollback
+     * Body: lote_id
+     *
+     * Borra (DELETE físico) SOLO las filas de empleados que pertenecen a
+     * ese lote_id específico -- es decir, solo lo que se insertó en esa
+     * sesión de subida de archivos. No toca ninguna otra carga_masiva de
+     * otro día/otro lote. Doble candado: carga_masiva=1 además de
+     * lote_importacion, para nunca poder rozar un empleado que no vino
+     * de esta carga.
+     */
+    public function rollbackLote(): mixed
+    {
+        $actor = $this->request->jwtUser;
+        if (!$actor) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo identificar al usuario'], 401);
+        }
+
+        $loteId = trim((string)($this->request->getVar('lote_id') ?? ''));
+        if ($loteId === '') {
+            return $this->respond(['status' => 'error', 'message' => 'Falta lote_id'], 400);
+        }
+
+        $db = \Config\Database::connect();
+
+        $count = $db->table('empleados')
+            ->where('lote_importacion', $loteId)
+            ->where('carga_masiva', 1)
+            ->countAllResults();
+
+        if ($count === 0) {
+            return $this->respond([
+                'status'     => 'ok',
+                'message'    => 'No había registros para ese lote (0 filas) -- nada que borrar',
+                'eliminados' => 0,
+            ]);
+        }
+
+        $db->table('empleados')
+            ->where('lote_importacion', $loteId)
+            ->where('carga_masiva', 1)
+            ->delete();
+
+        \App\Libraries\AuditLibrary::log(
+            (int)$actor->id,
+            'CARGA_MASIVA_ALTAS_ROLLBACK',
+            'empleados',
+            null,
+            "Rollback de lote {$loteId} -- {$count} empleados eliminados (borrado físico)"
+        );
+
+        return $this->respond([
+            'status'     => 'ok',
+            'message'    => "Se eliminaron {$count} empleados del lote",
+            'eliminados' => $count,
+        ]);
+    }
 }

@@ -80,9 +80,13 @@ $routes->group('api', function ($routes) {
             $routes->delete('(:num)',  'Api\V1\DeduccionesController::delete/$1');
         });
 
+
         $routes->group('importacion-masiva', ['filter' => ['jwt', 'importClave']], function ($routes) {
-            $routes->post('empleados',   'ImportacionMasivaController::empleados');
-            $routes->post('ubicaciones', 'ImportacionMasivaController::ubicaciones');
+            $routes->post('empleados',            'Api\V1\ImportacionMasivaController::empleados');
+            $routes->post('ubicaciones',          'Api\V1\ImportacionMasivaController::ubicaciones');
+            $routes->post('altas-xlsx',           'Api\V1\ImportacionMasivaController::altasXlsx');
+            $routes->post('altas-xlsx/confirmar', 'Api\V1\ImportacionMasivaController::confirmarLote');
+            $routes->post('altas-xlsx/rollback',  'Api\V1\ImportacionMasivaController::rollbackLote');
         });
 
 

@@ -390,7 +390,7 @@ class NominaFatigaController extends ResourceController
     }
 
     /** GET /api/v1/nomina/:id */
-   public function show($id = null): mixed
+    public function show($id = null): mixed
     {
         $model = new NominaFatigaModel();
         $nomina = $model->find((int)$id);
@@ -409,7 +409,7 @@ class NominaFatigaController extends ResourceController
                 NULLIF(TRIM(CONCAT(u.nombre, ' ', u.paterno, ' ', u.materno)), '') AS subido_por
             FROM nomina_fatiga_detalle nfd
             LEFT JOIN nomina_fatiga_cargas nc ON nc.id = nfd.id_carga
-            LEFT JOIN usuarios u              ON u.id = nc.created_by
+            LEFT JOIN usuario u                ON u.id = nc.created_by
             WHERE nfd.id_nomina = ?
             ORDER BY nfd.nombre_excel ASC
         ", [(int)$id])->getResultArray();
@@ -422,7 +422,7 @@ class NominaFatigaController extends ResourceController
                 nc.*,
                 NULLIF(TRIM(CONCAT(u.nombre, ' ', u.paterno, ' ', u.materno)), '') AS subido_por
             FROM nomina_fatiga_cargas nc
-            LEFT JOIN usuarios u ON u.id = nc.created_by
+            LEFT JOIN usuario u ON u.id = nc.created_by
             WHERE nc.id_nomina = ?
             ORDER BY nc.created_at ASC
         ", [(int)$id])->getResultArray();
@@ -2023,6 +2023,10 @@ class NominaFatigaController extends ResourceController
             }
 
             $salarioDiarioReal = null; // solo se usa en modo salario
+            $sueldoQuincenal   = null; // <-- FIX: movido aquí (antes estaba adentro del if($empleado) y
+                                    //     si $empleado era null, la variable nunca se creaba -- por
+                                    //     eso tronaba "Undefined variable" más abajo en el update().
+                                    //     Ahora SIEMPRE existe, con null, sin importar si hay match.
 
             if ($empleado) {
                 if (($empleado['modo_sueldo'] ?? 'tabulador') === 'salario' && (float)($empleado['salario_mensual'] ?? 0) > 0) {
@@ -2041,7 +2045,8 @@ class NominaFatigaController extends ResourceController
                     $tabulador = $tabuladorPorPar[$key] ?? null;
                 }
 
-                $sueldoQuincenal = null; 
+                // (la línea "$sueldoQuincenal = null;" que estaba aquí se borró --
+                // ya se declaró arriba, antes del if($empleado), ver "FIX")
 
                 if ($tabulador) {
                     $calculo = $this->calcularDesdeAsistencia($diasArr, $tabulador, $diasPeriodo, $salarioDiarioReal);
@@ -2188,7 +2193,7 @@ class NominaFatigaController extends ResourceController
             // (evita IAS negativo, que no tiene sentido en la práctica).
             if ($sdFijo > 0) {
                 if ($totalFinal <= 0) {
-                    $diasFiscales = 0; 
+                    $diasFiscales = 0;
                 } else {
                     $diasFiscalesMax = (int)floor($totalFinal / $sdFijo);
                     if ($diasFiscalesMax < $diasFiscales) {
@@ -2217,7 +2222,6 @@ class NominaFatigaController extends ResourceController
             }
 
             // ── Actualizar detalle de nómina con todos los campos ────────
-            // ── Actualizar detalle de nómina con todos los campos ────────
             $db->table('nomina_fatiga_detalle')->where('id', $det['id'])->update([
                 'id_empleado'           => $empleado['id'] ?? null,
                 'zona'                  => $servicio['servicio'] ?? ($det['servicio'] ?? null),
@@ -2225,7 +2229,7 @@ class NominaFatigaController extends ResourceController
                 'conteo_faltas'         => $calculo['conteo_faltas'] ?? 0,
                 'conteo_pss'            => $calculo['conteo_pss'] ?? 0,
                 'conteo_baja'           => $calculo['conteo_baja'] ?? 0,
-                'conteo_8h_extra'       => $calculo['conteo_8e']  ?? 0, 
+                'conteo_8h_extra'       => $calculo['conteo_8e']  ?? 0,
                 'sueldo_quincenal'      => $sueldoQuincenal,
                 'conteo_12h_extra'      => $calculo['conteo_12e'] ?? 0,
                 'conteo_24h_extra'      => $calculo['conteo_24e'] ?? 0,
@@ -2243,7 +2247,7 @@ class NominaFatigaController extends ResourceController
                 'desc_fonacot'          => $descFonacot,
                 'desc_infonavit'        => $descInfonavit,
                 'desc_pension'          => $descPension,
-                'conteo_incapacidad'    => $diasIncapacidad,  
+                'conteo_incapacidad'    => $diasIncapacidad,
                 'descuento_incapacidad' => 0,
                 'incapacidad_100'       => 0,
                 'incapacidad_imss'      => 0,
@@ -2259,9 +2263,9 @@ class NominaFatigaController extends ResourceController
                 'isr_bruto'             => $fiscal['isr_bruto'],
                 'subsidio_empleo'       => $fiscal['subsidio_empleo'],
                 'isr_neto'              => $fiscal['isr_neto'],
-                'neto_fiscal'           => $fiscal['neto_fiscal'],   
-                'ias'                   => $fiscal['ias'],           
-                'total_dispersion'      => $fiscal['total_dispersion'], 
+                'neto_fiscal'           => $fiscal['neto_fiscal'],
+                'ias'                   => $fiscal['ias'],
+                'total_dispersion'      => $fiscal['total_dispersion'],
                 'pendiente_calculo'     => 0,
             ]);
 
@@ -2980,32 +2984,33 @@ class NominaFatigaController extends ResourceController
     }
 
     /**
-     * Método completo, con el fix de "servicio" ya integrado (resuelto
-     * contra la tabla `servicios` por id_servicio, con el texto crudo del
-     * Excel nada más como respaldo). Reemplaza tu método completo por este.
+     * extraerFilasAsistenciaDesdeSpreadsheet() -- versión corregida.
      *
-     * OJO -- esto NO trae el fix aparte de `dias_columnas` que te pasé antes
-     * (el que ordena los días reales del Excel para que el frontend no los
-     * reordene numéricamente). Tu return de aquí sigue igual que como lo
-     * pegaste: `['filas' => $filas, 'omitidas' => $omitidas]`. Si ya
-     * aplicaste ese otro fix en tu copia real, agrégale
-     * `'dias_columnas' => array_keys($diaCols)` al return de abajo antes de
-     * pegar esto. Si no lo has aplicado, dime y te mando el método completo
-     * con AMBOS fixes juntos.
+     * Cambios sobre tu versión:
      *
-     * ── AGREGADO -- columna "Ubicación" ────────────────────────────────
-     * Igual que "Comentarios": OPCIONAL. Si tu plantilla .xlsm ya trae una
-     * columna con el encabezado exacto "Ubicación" (o "Ubicacion", sin
-     * acento, por si el Excel se guardó sin él) en la hoja "Asistencia", se
-     * lee sola. Si no la tiene, no truena nada -- simplemente se manda null,
-     * igual que pasa hoy con Comentarios en plantillas viejas.
+     * 1) FIX del bug "Undefined array key 95" -- array_unique() no reindexa,
+     *    se queda con huecos en las llaves. Se envuelve en array_values().
+     *
+     * 2) NUEVO -- cada fila ahora guarda '_fila_excel' => $r (el número de
+     *    fila real del Excel, ej. 95), para poder señalar exactamente dónde
+     *    está cada problema. No estorba en nada -- el front simplemente
+     *    ignora esta llave si no la usa.
+     *
+     * 3) NUEVO -- si dos o más filas SIN ID_Empleado válido comparten el
+     *    mismo nombre, se reportan en $omitidas con la fila y el nombre.
+     *    Motivo: sin un ID_Empleado que las distinga, el match por nombre
+     *    no puede saber a cuál persona corresponde cada fila -- las dos
+     *    terminarían apuntando al mismo empleado (una fila pisaría los días
+     *    de la otra). Se deja pasar el procesamiento igual (no se bloquea),
+     *    pero ahora SÍ queda avisado en el reporte, con fila y nombre.
+     *
+     * Todo lo demás es idéntico a tu método original.
      */
-    
     private function extraerFilasAsistenciaDesdeSpreadsheet(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
     {
         $sheet = $this->buscarHojaPorNombre($spreadsheet, 'Asistencia');
         if (!$sheet) return ['filas' => [], 'omitidas' => []];
-    
+
         $headerRow = null;
         $maxColCheck = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
         for ($r = 1; $r <= 5; $r++) {
@@ -3015,13 +3020,13 @@ class NominaFatigaController extends ResourceController
             }
         }
         if ($headerRow === null) return ['filas' => [], 'omitidas' => []];
-    
+
         $headers = [];
         for ($c = 1; $c <= $maxColCheck; $c++) {
             $v = trim((string)$sheet->getCell([$c, $headerRow])->getValue());
             if ($v !== '') $headers[$v] = $c;
         }
-    
+
         $colNombre    = $headers['Nombre Completo'] ?? null;
         $colIdEmp     = $headers['ID_Empleado'] ?? null;
         $colServicio  = $headers['Servicio'] ?? null;
@@ -3029,7 +3034,7 @@ class NominaFatigaController extends ResourceController
         $colAdicional = $headers['Adicional'] ?? null;
         $colOtrosDesc = $headers['Otros Descuento'] ?? null;
         $colComents   = $headers['Comentarios'] ?? null;
-    
+
         $columnasRequeridas = [
             'Nombre Completo' => $colNombre,
             'ID_Empleado'      => $colIdEmp,
@@ -3045,18 +3050,18 @@ class NominaFatigaController extends ResourceController
                 '. Headers encontrados: ' . implode(', ', array_keys($headers))
             );
         }
-    
+
         $diaCols = [];
         foreach ($headers as $label => $col) {
             if (is_numeric($label) && $colIdServ && $colAdicional && $col > $colIdServ && $col < $colAdicional) {
                 $diaCols[(int)$label] = $col;
             }
         }
-    
+
         $filas = [];
         $omitidas = [];
         $leer  = fn($col, $r) => trim((string)($sheet->getCell([$col, $r])->getValue() ?? ''));
-    
+
         /** Lee una celda que puede venir vacía, con un número válido, o con un
          *  error de fórmula (#N/D, #N/A, #REF!, #VALUE!, etc.). Regresa el int
          *  si es válido, o null si no lo es -- nunca lanza excepción. */
@@ -3071,17 +3076,17 @@ class NominaFatigaController extends ResourceController
             if (!is_numeric($vTexto)) return null;
             return (int)$vTexto;
         };
-    
+
         for ($r = $headerRow + 1; $r <= $sheet->getHighestRow(); $r++) {
             $nombreDeLaFila = $colNombre ? $leer($colNombre, $r) : '';
             $idEmpLimpio = $leerIdONull($colIdEmp, $r);
-    
+
             // Fila completamente vacía (sin nombre ni id) -- de relleno, se
             // ignora sin reportar, es normal que el Excel tenga filas así.
             if ($idEmpLimpio === null && $nombreDeLaFila === '') {
                 continue;
             }
-    
+
             // ID_Empleado vacío o inválido pero SÍ hay nombre -- YA NO se
             // descarta. Se manda con id_empleado=0 para que el match por
             // nombre (más abajo) la intente igual. Se deja constancia en
@@ -3090,21 +3095,23 @@ class NominaFatigaController extends ResourceController
             if ($idEmpLimpio === null) {
                 $valorCrudo = $sheet->getCell([$colIdEmp, $r])->getValue();
                 $omitidas[] = [
-                    'fila' => $r, 'nombre' => $nombreDeLaFila,
+                    'filas'  => [$r], // NUEVO -- siempre array, para que el front pueda listar filas exactas en un modal
+                    'nombre' => $nombreDeLaFila,
                     'motivo' => 'ID_Empleado vacío o inválido (' . ($valorCrudo ?? 'vacío') . ') -- se intentará match por nombre',
                 ];
                 $idEmpLimpio = 0;
             }
-    
+
             $idServLimpio = $leerIdONull($colIdServ, $r) ?? 0;
-    
+
             $dias = [];
             foreach ($diaCols as $num => $col) {
                 $v = $leer($col, $r);
                 if ($v !== '') $dias[$num] = strtoupper($v);
             }
-    
+
             $filas[] = [
+                '_fila_excel'      => $r, // NUEVO -- para poder señalar exactamente la fila en reportes/exportes
                 'nombre'           => $nombreDeLaFila,
                 'id_empleado'      => $idEmpLimpio,
                 'servicio'         => $leer($colServicio, $r),
@@ -3115,18 +3122,48 @@ class NominaFatigaController extends ResourceController
                 'comentarios'      => $colComents ? $leer($colComents, $r) : null,
             ];
         }
-    
+
         // ── Match por nombre para empleados sin ID válido (id_empleado=0) ──
         // Ahora sí le llegan TODAS las filas con ID vacío/#N/D, no solo las
         // que alguien escribió como 0 a mano.
         $sinId = array_filter($filas, fn($f) => ($f['id_empleado'] ?? 0) === 0 && !empty($f['nombre']));
-    
+
         if ($sinId) {
+            // NUEVO -- nombres repetidos ENTRE los que necesitan match por
+            // nombre. Si dos o más filas comparten nombre y ninguna trae
+            // ID_Empleado, no hay forma de saber a cuál persona corresponde
+            // cada una -- ambas terminarían apuntando al mismo empleado y una
+            // pisaría los días de la otra. Se reporta con la(s) fila(s) del
+            // Excel y el nombre exacto, para que se corrija agregando el
+            // ID_Empleado que falta en cada una.
+            $porNombre = [];
+            foreach ($sinId as $f) {
+                $nombreNorm = strtoupper(trim($f['nombre']));
+                $porNombre[$nombreNorm][] = $f;
+            }
+            foreach ($porNombre as $filasDelNombre) {
+                if (count($filasDelNombre) > 1) {
+                    $numerosDeFila = array_column($filasDelNombre, '_fila_excel');
+                    $omitidas[] = [
+                        'filas'  => $numerosDeFila, // NUEVO -- array de números de fila, no texto -- el front arma el modal con esto
+                        'nombre' => $filasDelNombre[0]['nombre'],
+                        'motivo' => 'Nombre repetido en ' . count($filasDelNombre) . ' filas sin ID_Empleado -- no se puede saber a cuál persona '
+                            . 'corresponde cada una. Agrega el ID_Empleado correcto en cada fila del Excel para desambiguar.',
+                    ];
+                }
+            }
+
             $db = \Config\Database::connect();
-    
-            $nombresUnicos = array_unique(array_column(array_values($sinId), 'nombre'));
+
+            // FIX del bug "Undefined array key 95" -- array_unique() no
+            // reindexa el arreglo (se queda con huecos donde quitó un
+            // duplicado). array_values() lo reacomoda a llaves 0,1,2...
+            // consecutivas antes de usarlo como parámetros del "?" en la
+            // query -- sin esto, el binder de CodeIgniter truena en cuanto
+            // se topa con el primer hueco.
+            $nombresUnicos = array_values(array_unique(array_column(array_values($sinId), 'nombre')));
             $placeholders  = implode(',', array_fill(0, count($nombresUnicos), '?'));
-    
+
             $matchPorNombre = [];
             if ($placeholders) {
                 $rows = $db->query("
@@ -3139,7 +3176,7 @@ class NominaFatigaController extends ResourceController
                     $matchPorNombre[strtoupper(trim($r['nombre_completo']))] = (int)$r['id'];
                 }
             }
-    
+
             foreach ($filas as &$fila) {
                 if (($fila['id_empleado'] ?? 0) === 0 && !empty($fila['nombre'])) {
                     $nombreNorm = strtoupper(trim($fila['nombre']));
@@ -3149,8 +3186,26 @@ class NominaFatigaController extends ResourceController
                 }
             }
             unset($fila);
+
+            // NUEVO -- de los que siguen sin ID después de intentar por nombre,
+            // avisa claramente que ESE empleado no está dado de alta (no se
+            // encontró en la tabla `empleados`). Se deja pasar igual (no se
+            // bloquea, id_empleado se queda en 0) -- esto es solo para que en
+            // "No cargados" se entienda POR QUÉ, en vez de que se pierda en
+            // silencio. No se reporta doble para los que ya salieron como
+            // "nombre repetido" arriba.
+            foreach ($filas as $fila) {
+                if (($fila['id_empleado'] ?? 0) !== 0 || empty($fila['nombre'])) continue;
+                $nombreNorm = strtoupper(trim($fila['nombre']));
+                if (isset($porNombre[$nombreNorm]) && count($porNombre[$nombreNorm]) > 1) continue; // ya reportado como duplicado
+                $omitidas[] = [
+                    'filas'  => [$fila['_fila_excel']],
+                    'nombre' => $fila['nombre'],
+                    'motivo' => 'Ese empleado no está dado de alta en el sistema (sin match por nombre ni por ID_Empleado) -- se procesa igual con id_empleado=0.',
+                ];
+            }
         }
-    
+
         // OJO -- ya NO se resuelve "servicio" contra el catálogo `servicios`
         // por id_servicio. Decidiste que el campo abierto se llene con el
         // texto CRUDO tal cual viene en la columna "Servicio" del Excel (el
@@ -3158,7 +3213,7 @@ class NominaFatigaController extends ResourceController
         // sobreescriba con el nombre del catálogo. id_servicio se sigue
         // leyendo y mandando (guardarFilasAsistencia lo usa para resolver la
         // zona del tabulador al calcular), nada más ya no pisa el texto.
-    
+
         return ['filas' => $filas, 'omitidas' => $omitidas];
     }
 
