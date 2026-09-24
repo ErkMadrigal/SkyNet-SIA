@@ -85,43 +85,56 @@ class IncidenciaModel extends Model
         string $dateTo,
         int $page,
         int $pageSize,
-        int $servicioId = 0, // NUEVO
-        int $clienteId  = 0, // NUEVO
-        int $zonaId     = 0  // NUEVO
-    ): array
-    {
+        int $servicioId = 0,
+        int $clienteId  = 0,
+        int $zonaId     = 0
+    ): array {
         $pageSize = max(1, min(200, $pageSize));
         $offset   = ($page - 1) * $pageSize;
-
+    
         $db = \Config\Database::connect();
-
+    
+        // Expresión reusable: nombre completo SIN espacios dobles, ni al
+        // inicio/final de cada parte ni entre ellas. Se usa igual para
+        // empleado (e.*) y capturista (ec.*) -- solo cambia el alias.
+        $nombreLimpio = function (string $alias): string {
+            $concat = "CONCAT_WS(' ', TRIM({$alias}.nombre), TRIM({$alias}.paterno), TRIM({$alias}.materno))";
+            // 3 pasadas de REPLACE colapsan hasta 8 espacios seguidos a 1 --
+            // de sobra para el caso real (dobles/triples espacios sueltos).
+            return "REPLACE(REPLACE(REPLACE({$concat}, '  ', ' '), '  ', ' '), '  ', ' ')";
+        };
+    
+        $empleadoExpr    = $nombreLimpio('e');
+        $capturistaExpr  = $nombreLimpio('ec');
+    
         $baseQuery = $db->table('asistencias a')
             ->select("
-                CONCAT_WS(' ', e.nombre, e.paterno, e.materno) AS empleado,
+                {$empleadoExpr} AS empleado,
                 CONCAT_WS(' ', a.fecha, a.hora) AS fecha,
                 CONCAT_WS(' | ', s.servicio, s.ubicacion, c.nombre_corto) AS servicio,
                 CONCAT_WS(', ', a.latitud, a.longitud) AS ubicacion,
                 CONCAT('https://www.google.com/maps?output=embed&q=', a.latitud, ',', a.longitud) AS maps_embed,
                 CONCAT('https://www.google.com/maps?q=', a.latitud, ',', a.longitud) AS maps_url,
                 a.ip,
-                CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno) AS capturista,
+                {$capturistaExpr} AS capturista,
                 CASE WHEN a.id_status=1 THEN 'Entrada' WHEN a.id_status=2 THEN 'Salida' ELSE 'Desconocido' END AS estado
             ")
             ->join('empleados e',  'e.id = a.id_empleado',   'left')
             ->join('empleados ec', 'a.id_capturista = ec.id', 'left')
             ->join('servicios s',  'a.id_ubicacion = s.id',   'left')
             ->join('clientes c',   's.id_cliente = c.id',     'left');
-
+    
         if ($search !== '') {
             $norm = preg_replace('/\s+/', ' ', trim($search));
             $baseQuery->groupStart()
-                ->like("CONCAT_WS(' ', e.nombre, e.paterno, e.materno)", $norm)
-                ->orLike("CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno)", $norm)
+                ->like($empleadoExpr, $norm)
+                ->orLike($capturistaExpr, $norm)
                 ->orLike('a.ip', $norm)
                 ->orLike('s.ubicacion', $norm)
+                ->orLike('e.id', $norm) // NUEVO -- búsqueda por número de empleado
                 ->groupEnd();
         }
-
+    
         if ($dateFrom !== '' && $dateTo !== '') {
             $baseQuery->where('a.fecha >=', $dateFrom)->where('a.fecha <=', $dateTo);
         } elseif ($dateFrom !== '') {
@@ -129,29 +142,29 @@ class IncidenciaModel extends Model
         } elseif ($dateTo !== '') {
             $baseQuery->where('a.fecha <=', $dateTo);
         }
-
-        // NUEVO -- filtros por servicio/cliente/zona
+    
         if ($servicioId > 0) $baseQuery->where('s.id', $servicioId);
         if ($clienteId  > 0) $baseQuery->where('s.id_cliente', $clienteId);
         if ($zonaId     > 0) $baseQuery->where('s.id_zona', $zonaId);
-
-        // Total — clona la query antes de agregar limit/offset
+    
+        // Total — misma lógica, clonada antes de limit/offset
         $total = $db->table('asistencias a')
             ->join('empleados e',  'e.id = a.id_empleado',   'left')
             ->join('empleados ec', 'a.id_capturista = ec.id', 'left')
             ->join('servicios s',  'a.id_ubicacion = s.id',   'left')
             ->join('clientes c',   's.id_cliente = c.id',     'left');
-
+    
         if ($search !== '') {
             $norm = preg_replace('/\s+/', ' ', trim($search));
             $total->groupStart()
-                ->like("CONCAT_WS(' ', e.nombre, e.paterno, e.materno)", $norm)
-                ->orLike("CONCAT_WS(' ', ec.nombre, ec.paterno, ec.materno)", $norm)
+                ->like($empleadoExpr, $norm)
+                ->orLike($capturistaExpr, $norm)
                 ->orLike('a.ip', $norm)
                 ->orLike('s.ubicacion', $norm)
+                ->orLike('e.id', $norm)
                 ->groupEnd();
         }
-
+    
         if ($dateFrom !== '' && $dateTo !== '') {
             $total->where('a.fecha >=', $dateFrom)->where('a.fecha <=', $dateTo);
         } elseif ($dateFrom !== '') {
@@ -159,22 +172,19 @@ class IncidenciaModel extends Model
         } elseif ($dateTo !== '') {
             $total->where('a.fecha <=', $dateTo);
         }
-
-        // NUEVO -- mismos filtros en el conteo, si no el total/paginación
-        // quedarían mal contra lo que en verdad se muestra.
+    
         if ($servicioId > 0) $total->where('s.id', $servicioId);
         if ($clienteId  > 0) $total->where('s.id_cliente', $clienteId);
         if ($zonaId     > 0) $total->where('s.id_zona', $zonaId);
-
+    
         $totalCount = (int)($total->countAllResults());
-
-        // Datos paginados
+    
         $data = $baseQuery
             ->orderBy('a.id', 'DESC')
             ->limit($pageSize, $offset)
             ->get()
             ->getResultArray();
-
+    
         return [
             'status' => 'ok',
             'data'   => $data,

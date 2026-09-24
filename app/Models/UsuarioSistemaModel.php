@@ -34,45 +34,103 @@ class UsuarioSistemaModel extends Model
     /** Lista todos los usuarios con sus roles y permisos agrupados. */
     public function getAllUsers(): array
     {
-        try {
-            $rows = $this->db->query("
-                SELECT
-                    u.id,
-                    CONCAT_WS(' ', u.nombre, u.paterno, u.materno) AS nombre_completo,
-                    u.name_user, u.correo, u.estatus,
-                    COALESCE(GROUP_CONCAT(DISTINCT r.tipo ORDER BY r.tipo SEPARATOR ', '), '') AS roles,
-                    COALESCE(GROUP_CONCAT(DISTINCT p.permiso ORDER BY p.permiso SEPARATOR ', '), '') AS permisos,
-                    COALESCE((
-                        SELECT CONCAT('[', GROUP_CONCAT(DISTINCT CONCAT(
-                            '{\"id_rol\":', rX.id, ',\"rol\":\"', REPLACE(rX.tipo,'\"','\\\\\"'), '\",\"permisos\":[',
-                            IFNULL((
-                                SELECT GROUP_CONCAT(DISTINCT CONCAT('\"', REPLACE(pX.permiso,'\"','\\\\\"'), '\"') ORDER BY pX.permiso SEPARATOR ',')
-                                FROM permiso_rol_empleados preX2
-                                INNER JOIN permisos pX ON pX.id = preX2.id_permiso
-                                WHERE preX2.id_empleado = u.id AND preX2.id_rol = rX.id
-                            ), ''), ']}'
-                        ) ORDER BY rX.tipo SEPARATOR ','), ']')
-                        FROM permiso_rol_empleados preX
-                        INNER JOIN roles rX ON rX.id = preX.id_rol
-                        WHERE preX.id_empleado = u.id
-                    ), '[]') AS roles_permisos
-                FROM usuario u
-                LEFT JOIN permiso_rol_empleados pre ON pre.id_empleado = u.id
-                LEFT JOIN roles r ON r.id = pre.id_rol
-                LEFT JOIN permisos p ON p.id = pre.id_permiso
-                GROUP BY u.id, u.nombre, u.paterno, u.materno, u.name_user, u.correo, u.estatus
-                ORDER BY u.id DESC
-            ")->getResultArray();
+    try {
+        // 1) Usuarios base -- sin joins, lo más barato posible.
+        $usuarios = $this->db->query("
+            SELECT
+                u.id,
+                CONCAT_WS(' ', u.nombre, u.paterno, u.materno) AS nombre_completo,
+                u.name_user, u.correo, u.estatus
+            FROM usuario u
+            ORDER BY u.id DESC
+        ")->getResultArray();
 
-            // Decodificar roles_permisos JSON string → array
-            foreach ($rows as &$row) {
-                $decoded = json_decode($row['roles_permisos'] ?? '[]', true);
-                $row['roles_permisos'] = is_array($decoded) ? $decoded : [];
+        if (!$usuarios) {
+            return ['status' => 'ok', 'data' => []];
+        }
+
+        // 2) Roles + permisos de TODOS los usuarios en UNA sola query
+        // plana -- nada de subqueries por fila. Trae una fila por cada
+        // combinación (empleado, rol, permiso).
+        $filas = $this->db->query("
+            SELECT
+                pre.id_empleado,
+                r.id   AS id_rol,
+                r.tipo AS rol,
+                p.permiso
+            FROM permiso_rol_empleados pre
+            INNER JOIN roles r     ON r.id = pre.id_rol
+            LEFT JOIN  permisos p  ON p.id = pre.id_permiso
+        ")->getResultArray();
+
+        // 3) Arma el árbol id_empleado -> { roles, permisos, roles_permisos }
+        // en memoria -- esto es lo que antes hacían las subqueries
+        // correlacionadas, pero aquí es un solo recorrido O(n).
+        $porEmpleado = [];
+        foreach ($filas as $f) {
+            $idEmp = $f['id_empleado'];
+            if (!isset($porEmpleado[$idEmp])) {
+                $porEmpleado[$idEmp] = ['roles' => [], 'permisos' => [], 'rolesMap' => []];
             }
-            unset($row);
 
-            return ['status' => 'ok', 'data' => $rows];
-        } catch (\Exception $e) { return $this->fail($e->getMessage()); }
+            $porEmpleado[$idEmp]['roles'][$f['rol']] = true;
+            if ($f['permiso'] !== null) {
+                $porEmpleado[$idEmp]['permisos'][$f['permiso']] = true;
+            }
+
+            $idRol = $f['id_rol'];
+            if (!isset($porEmpleado[$idEmp]['rolesMap'][$idRol])) {
+                $porEmpleado[$idEmp]['rolesMap'][$idRol] = [
+                    'id_rol'   => (int)$idRol,
+                    'rol'      => $f['rol'],
+                    'permisos' => [],
+                ];
+            }
+            if ($f['permiso'] !== null) {
+                $porEmpleado[$idEmp]['rolesMap'][$idRol]['permisos'][$f['permiso']] = true;
+            }
+        }
+
+        // 4) Combina con los usuarios base -- mismas 3 llaves que ya
+        // esperaba tu frontend: roles (string), permisos (string),
+        // roles_permisos (array de {id_rol, rol, permisos:[]}).
+        foreach ($usuarios as &$u) {
+            $info = $porEmpleado[$u['id']] ?? null;
+
+            if (!$info) {
+                $u['roles']          = '';
+                $u['permisos']       = '';
+                $u['roles_permisos'] = [];
+                continue;
+            }
+
+            $rolesUnicos = array_keys($info['roles']);
+            sort($rolesUnicos);
+            $u['roles'] = implode(', ', $rolesUnicos);
+
+            $permisosUnicos = array_keys($info['permisos']);
+            sort($permisosUnicos);
+            $u['permisos'] = implode(', ', $permisosUnicos);
+
+            $rolesPermisos = [];
+            foreach ($info['rolesMap'] as $rp) {
+                $permisosArr = array_keys($rp['permisos']);
+                sort($permisosArr);
+                $rolesPermisos[] = [
+                    'id_rol'   => $rp['id_rol'],
+                    'rol'      => $rp['rol'],
+                    'permisos' => $permisosArr,
+                ];
+            }
+            usort($rolesPermisos, fn($a, $b) => strcmp((string)$a['rol'], (string)$b['rol']));
+            $u['roles_permisos'] = $rolesPermisos;
+        }
+        unset($u);
+
+        return ['status' => 'ok', 'data' => $usuarios];
+    } catch (\Exception $e) {
+        return $this->fail($e->getMessage());
+    }
     }
 
     /** Detalle de un usuario con roles_permisos como array. */

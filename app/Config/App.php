@@ -17,8 +17,8 @@ class App extends BaseConfig
      * E.g., http://example.com/
      */
     // public string $baseURL = 'https://serprosep.vinculasag.com/';
-    // public string $baseURL = 'http://localhost/SkyNet-SIA/public/api/v1/';
-    public string $baseURL = 'https://serprosep.vinculasag.com/';
+    public string $baseURL = 'http://localhost/SkyNet-SIA/public/api/v1/';
+    // public string $baseURL = 'https://serprosep.vinculasag.com/';
 
 
 
