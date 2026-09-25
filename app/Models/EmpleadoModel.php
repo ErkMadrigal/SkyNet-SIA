@@ -414,14 +414,23 @@ class EmpleadoModel extends Model
     {
         $query = trim($query);
 
+        // NUEVO -- rostro_enrolado + descriptor_servidor (el embedding
+        // activo, si ya se enroló) para que el kiosko sepa si debe
+        // mandar al empleado a enrolarse antes de dejarlo checar, y
+        // para usar el vector capturado en vivo en vez de derivarlo de
+        // la foto de perfil.
+        $selectConEnrolamiento = 'id, CONCAT(nombre," ",paterno," ",materno) AS nombreCompleto, curp, rfc, fotos, id_puesto, '
+            . 'rostro_enrolado, '
+            . '(SELECT descriptor FROM empleado_rostro_embeddings WHERE id_empleado = empleados.id AND is_active = 1 LIMIT 1) AS descriptor_servidor';
+
         if (ctype_digit($query)) {
-            return $this->select('id, CONCAT(nombre," ",paterno," ",materno) AS nombreCompleto, curp, rfc, fotos, id_puesto')
+            return $this->select($selectConEnrolamiento)
                         ->where('id', (int)ltrim($query, '0'))
                         ->where('estatus', 1)
                         ->first();
         }
 
-        return $this->select('id, CONCAT(nombre," ",paterno," ",materno) AS nombreCompleto, curp, rfc, fotos, id_puesto')
+        return $this->select($selectConEnrolamiento)
                     ->groupStart()
                         ->where('curp', strtoupper($query))
                         ->orWhere('rfc', strtoupper($query))

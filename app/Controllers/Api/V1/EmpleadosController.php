@@ -945,6 +945,131 @@ class EmpleadosController extends ResourceController
         ]);
     }
 
+    /**
+     * PATCH /api/v1/empleados/{id}/salida-anticipada
+     * Body: { permitir: 0|1 }
+     *
+     * Autoriza (o quita la autorización) a este empleado para registrar
+     * su salida ANTES de que se cumpla su horario -- normalmente
+     * BiometricoController::registro()/estado() lo bloquean. Pensado
+     * para casos justificados (una incidencia, permiso especial, etc.).
+     *
+     * OJO -- se apaga sola en cuanto el empleado la usa una vez (ver
+     * BiometricoController::registro()), para que no quede como un
+     * permiso permanente olvidado prendido.
+     */
+    public function toggleSalidaAnticipada($id = null): mixed
+    {
+        $actor = $this->request->jwtUser;
+        $model = new EmpleadoModel();
+
+        $empleado = $model->find((int)$id);
+        if (!$empleado) {
+            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
+        }
+
+        $body   = $this->request->getJSON(true);
+        $valor  = isset($body['permitir']) ? (int)$body['permitir'] : null;
+
+        if ($valor === null || !in_array($valor, [0, 1], true)) {
+            return $this->respond(['status' => 'error', 'message' => 'Valor inválido. Use 0 o 1'], 422);
+        }
+
+        $model->update((int)$id, ['permitir_salida_anticipada' => $valor]);
+
+        $msg = $valor === 1
+            ? 'Se autorizó al empleado a registrar salida anticipada (se apaga sola al usarse)'
+            : 'Se quitó la autorización de salida anticipada';
+
+        AuditLibrary::log(
+            (int)$actor->id,
+            $valor === 1 ? 'AUTORIZAR_SALIDA_ANTICIPADA' : 'QUITAR_SALIDA_ANTICIPADA',
+            'empleados', (string)$id, $msg
+        );
+
+        return $this->respond([
+            'status'  => 'ok',
+            'message' => $msg,
+            'data'    => ['id' => (int)$id, 'permitir_salida_anticipada' => $valor],
+        ]);
+    }
+
+    /**
+     * GET /api/v1/empleados/{id}/estado-asistencia
+     *
+     * Estado actual del empleado: si tiene una entrada activa sin
+     * salida ("dentro") o no ("fuera"), y cuándo fue su último registro
+     * -- para mostrarlo en el perfil sin tener que ir a buscarlo en
+     * "Registros".
+     */
+    public function estadoAsistencia($id = null): mixed
+    {
+        $model  = new EmpleadoModel();
+        $ultima = $model->ultimaAsistencia((int)$id);
+
+        if ($ultima['status'] !== 'ok') {
+            return $this->respond([
+                'status' => 'ok',
+                'data'   => [
+                    'estado'        => 'sin_registros',
+                    'ultimo_tipo'   => null,
+                    'ultima_fecha'  => null,
+                    'ultima_hora'   => null,
+                ],
+            ]);
+        }
+
+        $row = $ultima['data'];
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => [
+                // dentro = tiene entrada sin salida todavía; fuera = ya salió (o nunca ha entrado hoy)
+                'estado'       => (int)$row['id_status'] === 1 ? 'dentro' : 'fuera',
+                'ultimo_tipo'  => $row['tipo_asistencia'],
+                'ultima_fecha' => $row['fecha'],
+                'ultima_hora'  => $row['hora'],
+            ],
+        ]);
+    }
+
+    /**
+     * GET /api/v1/empleados/{id}/asistencias?limit=50&offset=0
+     *
+     * Historial de entradas/salidas de este empleado, para el modal de
+     * "Registros de asistencia" en su perfil.
+     */
+    public function historialAsistencias($id = null): mixed
+    {
+        $limit  = (int)($this->request->getVar('limit')  ?? 50);
+        $offset = (int)($this->request->getVar('offset') ?? 0);
+        $limit  = max(1, min(200, $limit));
+
+        $db = \Config\Database::connect();
+
+        $rows = $db->query("
+            SELECT
+                a.id, a.fecha, a.hora, a.id_status,
+                CASE WHEN a.id_status = 1 THEN 'Entrada' WHEN a.id_status = 2 THEN 'Salida' ELSE 'Desconocido' END AS tipo,
+                s.servicio AS ubicacion
+            FROM asistencias a
+            LEFT JOIN servicios s ON s.id = a.id_ubicacion
+            WHERE a.id_empleado = ?
+            ORDER BY a.id DESC
+            LIMIT ? OFFSET ?
+        ", [(int)$id, $limit, $offset])->getResultArray();
+
+        $total = (int)$db->query(
+            'SELECT COUNT(*) AS t FROM asistencias WHERE id_empleado = ?', [(int)$id]
+        )->getRowArray()['t'];
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => $rows,
+            'total'  => $total,
+        ]);
+    }
+
     /* ═══════════════════════════════════════════════════════════════
        BAJA INDIVIDUAL Y ACCIONES
     ═══════════════════════════════════════════════════════════════ */

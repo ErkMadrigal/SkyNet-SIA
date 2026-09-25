@@ -117,14 +117,15 @@ class BiometricoController extends ResourceController
         // ── Obtener turno del empleado ────────────────────────────
         $db    = \Config\Database::connect();
         $turno = $db->query(
-            'SELECT e.id_turno, mt.valor AS turno_valor
+            'SELECT e.id_turno, e.permitir_salida_anticipada, mt.valor AS turno_valor
              FROM empleados e
              LEFT JOIN multicatalogo mt ON e.id_turno = mt.id
              WHERE e.id = ?',
             [$idEmpleado]
         )->getRowArray();
 
-        $idTurno = (int)($turno['id_turno'] ?? 0);
+        $idTurno                  = (int)($turno['id_turno'] ?? 0);
+        $permitirSalidaAnticipada = (int)($turno['permitir_salida_anticipada'] ?? 0) === 1;
 
         $configTurnos = [
             1367 => ['entrada' => '08:00', 'salida' => '08:00', 'siguiente_dia' => true,  'tipo' => '24x24'],
@@ -222,7 +223,7 @@ class BiometricoController extends ResourceController
                 $ventanaMinima = clone $fechaSalida;
                 $ventanaMinima->modify('-15 minutes');
 
-                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp()) {
+                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp() && !$permitirSalidaAnticipada) {
                     $minutosRestantes = (int)(($ventanaMinima->getTimestamp() - $ahora->getTimestamp()) / 60);
                     $horas            = floor($minutosRestantes / 60);
                     $mins             = $minutosRestantes % 60;
@@ -252,6 +253,33 @@ class BiometricoController extends ResourceController
                             'minutos_restantes'  => $minutosRestantes,
                         ],
                     ], 423);
+                }
+
+                // Si se usó la autorización de salida anticipada para pasar la
+                // ventana, se registra como incidencia (para que quede huella
+                // de que fue una excepción) y se apaga la bandera -- es un
+                // permiso de un solo uso, no permanente.
+                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp() && $permitirSalidaAnticipada) {
+                    try {
+                        $db->table('incidencias')->insert([
+                            'id_empleado' => $idEmpleado,
+                            'tipo'        => 'salida_anticipada_autorizada',
+                            'descripcion' => 'Salida anticipada autorizada por el administrador',
+                            'fecha'       => $ahora->format('Y-m-d'),
+                            'hora'        => $ahora->format('H:i:s'),
+                            'estatus'     => 1,
+                            'activo'      => 1,
+                            'created_at'  => $ahora->format('Y-m-d H:i:s'),
+                        ]);
+                    } catch (\Exception $e) {
+                        log_message('error', 'Error incidencia salida anticipada autorizada: ' . $e->getMessage());
+                    }
+
+                    try {
+                        $model->update($idEmpleado, ['permitir_salida_anticipada' => 0]);
+                    } catch (\Exception $e) {
+                        log_message('error', 'Error al apagar permitir_salida_anticipada: ' . $e->getMessage());
+                    }
                 }
             }
         }
@@ -340,10 +368,11 @@ class BiometricoController extends ResourceController
 
         if ($esSalida) {
             $turno = $db->query(
-                'SELECT e.id_turno FROM empleados e WHERE e.id = ?', [$idEmpleado]
+                'SELECT e.id_turno, e.permitir_salida_anticipada FROM empleados e WHERE e.id = ?', [$idEmpleado]
             )->getRowArray();
 
-            $idTurno      = (int)($turno['id_turno'] ?? 0);
+            $idTurno                  = (int)($turno['id_turno'] ?? 0);
+            $permitirSalidaAnticipada = (int)($turno['permitir_salida_anticipada'] ?? 0) === 1;
             $configTurnos = [
                 1367 => ['salida' => '08:00', 'siguiente_dia' => true],
                 1382 => ['salida' => '20:00', 'siguiente_dia' => false],
@@ -376,7 +405,7 @@ class BiometricoController extends ResourceController
                     $ventana = clone $fechaSalida;
                     $ventana->modify('-15 minutes');
 
-                    if ($ahora->getTimestamp() < $ventana->getTimestamp()) {
+                    if ($ahora->getTimestamp() < $ventana->getTimestamp() && !$permitirSalidaAnticipada) {
                         $mins  = (int)(($ventana->getTimestamp() - $ahora->getTimestamp()) / 60);
                         $horas = floor($mins / 60);
                         $minsR = $mins % 60;
@@ -474,8 +503,14 @@ class BiometricoController extends ResourceController
 
         $db = \Config\Database::connect();
 
+        // NUEVO -- rostro_enrolado + el descriptor activo (si ya se
+        // enroló) se mandan junto con el empleado. Así el kiosko, al
+        // sincronizar, usa el vector capturado EN VIVO durante el
+        // enrolamiento en vez de derivarlo de la foto de perfil --
+        // más preciso, y no tiene que descargar+procesar la foto de
+        // cada empleado uno por uno.
         $empleados = $db->query("
-            SELECT 
+            SELECT
                 e.id,
                 CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) AS nombreCompleto,
                 e.curp,
@@ -484,11 +519,15 @@ class BiometricoController extends ResourceController
                 e.id_turno,
                 e.acceso_biometrico,
                 e.id_ubicacion_principal,
+                e.rostro_enrolado,
                 s.servicio AS ubicacion_nombre,
-                mp.valor AS puesto
+                mp.valor AS puesto,
+                ere.descriptor AS descriptor_servidor
             FROM empleados e
             LEFT JOIN servicios s ON e.id_ubicacion_principal = s.id
             LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+            LEFT JOIN empleado_rostro_embeddings ere
+                ON ere.id_empleado = e.id AND ere.is_active = 1
             WHERE e.id_ubicacion_principal = ?
             AND e.estatus = 1
             AND e.acceso_biometrico = 1
@@ -520,7 +559,7 @@ class BiometricoController extends ResourceController
         $db = \Config\Database::connect();
 
         $empleado = $db->query("
-            SELECT 
+            SELECT
                 e.id,
                 CONCAT(e.nombre, ' ', e.paterno, ' ', e.materno) AS nombreCompleto,
                 e.curp,
@@ -529,11 +568,15 @@ class BiometricoController extends ResourceController
                 e.id_turno,
                 e.acceso_biometrico,
                 e.id_ubicacion_principal,
+                e.rostro_enrolado,
                 s.servicio AS ubicacion_nombre,
-                mp.valor AS puesto
+                mp.valor AS puesto,
+                ere.descriptor AS descriptor_servidor
             FROM empleados e
             LEFT JOIN servicios s ON e.id_ubicacion_principal = s.id
             LEFT JOIN multicatalogo mp ON e.id_puesto = mp.id
+            LEFT JOIN empleado_rostro_embeddings ere
+                ON ere.id_empleado = e.id AND ere.is_active = 1
             WHERE e.estatus = 1
             AND e.acceso_biometrico = 1
             AND (
@@ -580,6 +623,151 @@ class BiometricoController extends ResourceController
                 'lat'    => $servicio['data']['lat'] ?? null,
                 'lon'    => $servicio['data']['lon'] ?? null,
             ]
+        ]);
+    }
+
+
+    /**
+     * GET /api/v1/biometrico/ubicaciones-buscar?q=texto
+     *
+     * NUEVO -- para el kiosko: antes había que teclear el ID de ubicación
+     * a mano en "Configuración del Dispositivo". Ahora se busca por
+     * NOMBRE y el kiosko muestra una lista para elegir.
+     *
+     * Se limpia el nombre con TRIM/REPLACE antes de comparar -- varios
+     * registros de `servicios` traen espacios dobles (mismo problema que
+     * ya se encontró en el buscador de "Registros"), y sin esto la
+     * búsqueda por nombre fallaría igual.
+     */
+    public function ubicacionesBuscar(): mixed
+    {
+        $q = trim((string)($this->request->getGet('q') ?? ''));
+        if (mb_strlen($q) < 2) {
+            return $this->respond(['status' => 'ok', 'data' => []]);
+        }
+
+        $db = \Config\Database::connect();
+
+        $nombreLimpio = "REPLACE(REPLACE(REPLACE(TRIM(s.servicio), '  ', ' '), '  ', ' '), '  ', ' ')";
+
+        $rows = $db->table('servicios s')
+            ->select("s.id, {$nombreLimpio} AS nombre")
+            ->where('s.estatus', 1)
+            ->like($nombreLimpio, preg_replace('/\s+/', ' ', $q))
+            ->orderBy('s.servicio', 'ASC')
+            ->limit(20)
+            ->get()
+            ->getResultArray();
+
+        return $this->respond([
+            'status' => 'ok',
+            'data'   => $rows,
+        ]);
+    }
+
+
+    /**
+     * POST /api/v1/biometrico/enrolar
+     * Body: { id_empleado, descriptor_guardar: [128 floats], descriptor_verificar: [128 floats], id_capturista? }
+     *
+     * Enrolamiento facial estilo Cheil -- 2 capturas en vivo, no la foto
+     * de perfil:
+     *   1) descriptor_guardar    -- primera captura, la que se guarda.
+     *   2) descriptor_verificar  -- segunda captura inmediata, solo para
+     *      confirmar que salió una captura de buena calidad de la MISMA
+     *      persona (evita enrolar con un vector corrupto/borroso).
+     *
+     * Si la distancia euclidiana entre ambas es aceptable, se marca
+     * como activo el nuevo embedding (el viejo, si había, se desactiva
+     * pero no se borra -- queda de historial) y se prende
+     * empleados.rostro_enrolado.
+     */
+    public function enrolar(): mixed
+    {
+        $idEmpleado = (int)($this->request->getVar('id_empleado') ?? 0);
+        $descGuardar    = $this->request->getVar('descriptor_guardar');
+        $descVerificar  = $this->request->getVar('descriptor_verificar');
+        $idCapturista   = (int)($this->request->getVar('id_capturista') ?? 0) ?: null;
+
+        if ($idEmpleado <= 0) {
+            return $this->respond(['status' => 'error', 'message' => 'id_empleado requerido'], 400);
+        }
+
+        // Body puede llegar como JSON (array ya decodificado) o como
+        // string JSON si vino por form-urlencoded -- se normaliza.
+        $descGuardar   = is_string($descGuardar)   ? json_decode($descGuardar, true)   : $descGuardar;
+        $descVerificar = is_string($descVerificar) ? json_decode($descVerificar, true) : $descVerificar;
+
+        if (!is_array($descGuardar) || !is_array($descVerificar)
+            || count($descGuardar) !== 128 || count($descVerificar) !== 128) {
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Se requieren descriptor_guardar y descriptor_verificar, cada uno con 128 valores',
+            ], 422);
+        }
+
+        $db = \Config\Database::connect();
+
+        $empleado = $db->table('empleados')->where('id', $idEmpleado)->where('estatus', 1)->get()->getRowArray();
+        if (!$empleado) {
+            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
+        }
+
+        // Distancia euclidiana entre las 2 capturas -- mismo cálculo que
+        // hace face-api.js del lado del cliente (tensorflow.service.ts).
+        $distancia = 0.0;
+        for ($i = 0; $i < 128; $i++) {
+            $diff = ((float)$descGuardar[$i]) - ((float)$descVerificar[$i]);
+            $distancia += $diff * $diff;
+        }
+        $distancia = sqrt($distancia);
+
+        // Mismo umbral que ya usa el front (tensorflow.service.ts ->
+        // UMBRAL_DISTANCIA / comparar(), score>=0.79 equivale a esta
+        // distancia). Si las 2 capturas del enrolamiento no se parecen
+        // ni entre ellas, algo salió mal (movimiento, mala luz, etc.)
+        // y no se guarda.
+        $UMBRAL = 0.376;
+
+        if ($distancia > $UMBRAL) {
+            return $this->respond([
+                'status'    => 'error',
+                'message'   => 'Las dos capturas no coinciden lo suficiente, intenta de nuevo con mejor luz y sin moverte',
+                'distancia' => round($distancia, 6),
+            ], 422);
+        }
+
+        $db->transStart();
+
+        $db->table('empleado_rostro_embeddings')
+            ->where('id_empleado', $idEmpleado)
+            ->where('is_active', 1)
+            ->update(['is_active' => 0]);
+
+        $db->table('empleado_rostro_embeddings')->insert([
+            'id_empleado'            => $idEmpleado,
+            'descriptor'             => json_encode(array_values($descGuardar)),
+            'distancia_verificacion' => round($distancia, 6),
+            'is_active'              => 1,
+            'id_capturista'          => $idCapturista,
+            'created_at'             => date('Y-m-d H:i:s'),
+        ]);
+
+        $db->table('empleados')->where('id', $idEmpleado)->update(['rostro_enrolado' => 1]);
+
+        $db->transComplete();
+
+        if (!$db->transStatus()) {
+            return $this->respond(['status' => 'error', 'message' => 'Error al guardar el enrolamiento'], 500);
+        }
+
+        AuditLibrary::log($idCapturista ?? 0, 'ENROLAMIENTO_FACIAL', 'empleados', (string)$idEmpleado,
+            "Enrolamiento facial de empleado {$idEmpleado} -- distancia entre capturas: " . round($distancia, 6));
+
+        return $this->respond([
+            'status'    => 'ok',
+            'message'   => 'Rostro enrolado correctamente',
+            'distancia' => round($distancia, 6),
         ]);
     }
 

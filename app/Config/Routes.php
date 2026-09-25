@@ -131,6 +131,8 @@ $routes->group('api', function ($routes) {
             $routes->get('sync',        'Api\V1\BiometricoController::sync');
             $routes->get('buscar-sync', 'Api\V1\BiometricoController::buscarSync');
             $routes->get('ubicacion-cercana', 'Api\V1\BiometricoController::ubicacionCercana');
+            $routes->get('ubicaciones-buscar', 'Api\V1\BiometricoController::ubicacionesBuscar'); // NUEVO -- búsqueda por nombre para el kiosko
+            $routes->post('enrolar', 'Api\V1\BiometricoController::enrolar'); // NUEVO -- enrolamiento facial (2 capturas)
 
         });
 
@@ -151,6 +153,9 @@ $routes->group('api', function ($routes) {
         ───────────────────────────────────────────────── */
         $routes->group('empleados', ['filter' => 'jwt'], function ($routes) {
             $routes->patch('(:num)/biometrico', 'Api\V1\EmpleadosController::toggleBiometrico/$1');
+            $routes->patch('(:num)/salida-anticipada', 'Api\V1\EmpleadosController::toggleSalidaAnticipada/$1'); // NUEVO
+            $routes->get('(:num)/estado-asistencia',   'Api\V1\EmpleadosController::estadoAsistencia/$1');       // NUEVO
+            $routes->get('(:num)/asistencias',         'Api\V1\EmpleadosController::historialAsistencias/$1');   // NUEVO
             $routes->get('/',             'Api\V1\EmpleadosController::index');
             $routes->get('buscar',        'Api\V1\EmpleadosController::buscar');
             $routes->get('dashboard',     'Api\V1\EmpleadosController::dashboard');
