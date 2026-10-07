@@ -187,6 +187,32 @@ $routes->group('api', function ($routes) {
         /* ─────────────────────────────────────────────────
            INCIDENCIAS
         ───────────────────────────────────────────────── */
+        /* ── Cámaras desde la app del kiosko (sin JWT, igual que biometrico/*;
+              el operador se identifica con id_operador en el body) ── */
+        $routes->group('camaras-kiosko', function ($routes) {
+            $routes->get('geocodificar',   'Api\V1\CamarasController::geocodificar');
+            $routes->get('/',              'Api\V1\CamarasController::index');
+            $routes->post('/',             'Api\V1\CamarasController::create');
+            $routes->post('(:num)/tickets','Api\V1\CamarasController::crearTicket/$1');
+        });
+
+        /* ── Cámaras georreferenciadas + tickets de falla (panel SIAG) ── */
+        $routes->group('camaras', ['filter' => 'jwt'], function ($routes) {
+            // Estáticas primero, antes de los (:num)
+            $routes->get('resumen',                    'Api\V1\CamarasController::resumen');
+            $routes->get('geocodificar',               'Api\V1\CamarasController::geocodificar');
+            $routes->get('tickets',                    'Api\V1\CamarasController::tickets');
+            $routes->get('tickets/(:num)',             'Api\V1\CamarasController::ticketDetalle/$1');
+            $routes->post('tickets/(:num)/comentarios','Api\V1\CamarasController::comentarTicket/$1');
+
+            $routes->get('/',                          'Api\V1\CamarasController::index');
+            $routes->post('/',                         'Api\V1\CamarasController::create');
+            $routes->get('(:num)',                     'Api\V1\CamarasController::show/$1');
+            $routes->post('(:num)',                    'Api\V1\CamarasController::actualizar/$1');
+            $routes->delete('(:num)',                  'Api\V1\CamarasController::delete/$1');
+            $routes->post('(:num)/tickets',            'Api\V1\CamarasController::crearTicket/$1');
+        });
+
         $routes->group('incidencias', ['filter' => 'jwt'], function ($routes) {
             $routes->get('/',               'Api\V1\IncidenciasController::index');
             $routes->post('/',              'Api\V1\IncidenciasController::create');
