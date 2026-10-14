@@ -196,6 +196,26 @@ $routes->group('api', function ($routes) {
             $routes->post('(:num)/tickets','Api\V1\CamarasController::crearTicket/$1');
         });
 
+        /* ── Mesa de ayuda desde la app del kiosko (sin JWT; operador = id_operador) ── */
+        $routes->group('mesa-ayuda-kiosko', function ($routes) {
+            $routes->get('categorias',   'Api\V1\MesaAyudaController::categorias');
+            $routes->get('geocodificar', 'Api\V1\CamarasController::geocodificar');
+            $routes->get('camaras',      'Api\V1\CamarasController::index');
+            $routes->get('/',            'Api\V1\MesaAyudaController::index');
+            $routes->post('/',           'Api\V1\MesaAyudaController::create');
+        });
+
+        /* ── Mesa de ayuda (panel SIAG) ── */
+        $routes->group('mesa-ayuda', ['filter' => 'jwt'], function ($routes) {
+            $routes->get('categorias',            'Api\V1\MesaAyudaController::categorias');
+            $routes->get('usuarios',              'Api\V1\MesaAyudaController::usuarios');
+            $routes->get('resumen',               'Api\V1\MesaAyudaController::resumen');
+            $routes->get('/',                     'Api\V1\MesaAyudaController::index');
+            $routes->post('/',                    'Api\V1\MesaAyudaController::create');
+            $routes->get('(:num)',                'Api\V1\MesaAyudaController::show/$1');
+            $routes->post('(:num)/seguimiento',   'Api\V1\MesaAyudaController::seguimiento/$1');
+        });
+
         /* ── Cámaras georreferenciadas + tickets de falla (panel SIAG) ── */
         $routes->group('camaras', ['filter' => 'jwt'], function ($routes) {
             // Estáticas primero, antes de los (:num)

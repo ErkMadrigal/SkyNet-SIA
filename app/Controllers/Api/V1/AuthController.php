@@ -239,7 +239,7 @@ class AuthController extends ResourceController
             $empresas = $model->empresasAsignadas((int)$usuario->id);
         }
 
-        $vistas = $model->vistasDelRol((int)$usuario->rol);
+        $vistas = $model->vistasDelUsuario((int)$usuario->id, (int)$usuario->rol);
 
         return $this->respond([
             'status' => 'ok',

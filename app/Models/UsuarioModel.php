@@ -174,10 +174,45 @@ class UsuarioModel extends Model
             WHERE pre.id_empleado = ? AND v.activo = 1
         ", [$idUsuario])->getResultArray();
 
-        $slugs = array_merge(
-            array_column($vistasRol, 'slug'),
-            array_column($vistasIndividuales, 'slug')
-        );
+        // Permisos granulares por módulo: "<modulo>.<accion>" con accion =
+        // leer | crear | actualizar | eliminar. Se generan directo de
+        // permiso_rol_empleados, así que cualquier módulo nuevo en `roles`
+        // funciona sin tener que dar de alta filas en `vistas`.
+        $granulares = [];
+        $filas = $this->db->query("
+            SELECT r.tipo, p.permiso
+            FROM permiso_rol_empleados pre
+            JOIN roles r    ON r.id = pre.id_rol
+            JOIN permisos p ON p.id = pre.id_permiso
+            WHERE pre.id_empleado = ?
+        ", [$idUsuario])->getResultArray();
+        $acciones = ['leer' => 'leer', 'ver' => 'leer', 'crear' => 'crear',
+                     'actualizar' => 'actualizar', 'editar' => 'actualizar', 'eliminar' => 'eliminar'];
+        foreach ($filas as $f) {
+            $mod = preg_replace('/[^a-z0-9_]+/', '_', strtolower(trim((string)$f['tipo'])));
+            $acc = $acciones[strtolower(trim((string)$f['permiso']))] ?? null;
+            if ($mod !== '' && $acc) $granulares[] = $mod . '.' . $acc;
+        }
+
+        // Si el colaborador tiene permisos asignados individualmente en la
+        // matriz, ESOS son los únicos que cuentan. Las vistas por defecto del
+        // rol (operador = empleados, incidencias, biométrico...) solo aplican
+        // a usuarios que no tienen matriz asignada.
+        // Administrador (rol 2): todo el poder = vistas del rol + lo individual.
+        if ($idRol === 2) {
+            $slugs = array_merge(
+                array_column($vistasRol, 'slug'),
+                array_column($vistasIndividuales, 'slug'),
+                $granulares
+            );
+        } elseif (!empty($filas)) {
+            $slugs = array_merge(
+                array_column($vistasIndividuales, 'slug'),
+                $granulares
+            );
+        } else {
+            $slugs = array_column($vistasRol, 'slug');
+        }
 
         return array_values(array_unique($slugs));
     }

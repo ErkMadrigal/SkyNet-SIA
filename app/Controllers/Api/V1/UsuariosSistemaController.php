@@ -72,6 +72,16 @@ class UsuariosSistemaController extends ResourceController
         $materno = trim($this->request->getVar('materno') ?? '');
         $correo  = trim($this->request->getVar('correo'));
 
+        // Nivel del colaborador: 2 = Administrador (todo el poder),
+        // 3 = Operador (solo lo que se le asigne en la matriz). Default 3.
+        $idRolSistema = (int)($this->request->getVar('id_rol_sistema') ?? 3);
+        if (!in_array($idRolSistema, [2, 3], true)) {
+            return $this->respond(['status' => 'error', 'message' => 'Nivel inválido (usa 2 o 3)'], 422);
+        }
+        if ($idRolSistema === 2 && (int)($actor->nivel ?? 99) > 2) {
+            return $this->respond(['status' => 'error', 'message' => 'No puedes crear administradores'], 403);
+        }
+
         $model    = new UsuarioSistemaModel();
         $userName = $model->generarUsername($nombre, $paterno, $materno);
 
@@ -90,14 +100,15 @@ class UsuariosSistemaController extends ResourceController
             $nombre, $correo, $userName,
             $paterno, $materno,
             password_hash((string)$password, PASSWORD_ARGON2ID),
-            1
+            1,
+            $idRolSistema
         );
 
         if ($res['status'] !== 'ok') {
             return $this->respond($res, 500);
         }
 
-        AuditLibrary::log((int)$actor->id, 'CREAR_USUARIO_SISTEMA', 'usuario', (string)($res['last_insert_id'] ?? ''), "Creó usuario {$userName}");
+        AuditLibrary::log((int)$actor->id, 'CREAR_USUARIO_SISTEMA', 'usuario', (string)($res['last_insert_id'] ?? ''), "Creó usuario {$userName} (nivel {$idRolSistema})");
 
         return $this->respond([
             'status'   => 'ok',

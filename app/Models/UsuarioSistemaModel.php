@@ -256,7 +256,7 @@ class UsuarioSistemaModel extends Model
     }
 
     /** Registra un nuevo usuario del sistema. */
-    public function registro(string $nombre, string $correo, string $nameUser, string $paterno, string $materno, string $passwordHash, int $estatus): array
+    public function registro(string $nombre, string $correo, string $nameUser, string $paterno, string $materno, string $passwordHash, int $estatus, int $idRolSistema = 3): array
     {
         try {
             $this->db->table('usuario')->insert([
@@ -267,6 +267,7 @@ class UsuarioSistemaModel extends Model
                 'materno'   => $materno,
                 'password'  => $passwordHash,
                 'estatus'   => $estatus,
+                'id_rol_sistema' => $idRolSistema,
             ]);
             return ['status' => 'ok', 'mensaje' => 'Registro exitoso', 'last_insert_id' => $this->db->insertID()];
         } catch (\Exception $e) { return $this->fail($e->getMessage()); }

@@ -4,6 +4,8 @@ namespace App\Controllers\Api\V1;
 
 use CodeIgniter\RESTful\ResourceController;
 use App\Libraries\AuditLibrary;
+use App\Libraries\PermisoLibrary;
+use App\Libraries\GeoLibrary;
 
 /**
  * CamarasController -- cámaras georreferenciadas + tickets de falla.
@@ -33,6 +35,19 @@ class CamarasController extends ResourceController
     private string $fotoBasePath;
     private string $fotoBaseUrl;
 
+    /**
+     * Permisos del panel: solo aplican cuando la petición trae JWT
+     * (el kiosko usa rutas públicas con id_operador y no pasa por aquí).
+     * Devuelve la respuesta 403 si no tiene permiso, o null si puede.
+     */
+    private function sinPermiso(string $accion): mixed
+    {
+        $user = $this->request->jwtUser ?? null;
+        if (!$user) return null;
+        $err = PermisoLibrary::exigir($user, 'camaras', $accion);
+        return $err ? $this->respond($err, 403) : null;
+    }
+
     public function __construct()
     {
         $this->fotoBasePath = env('CAMARAS_PATH', FCPATH . 'camaras/');
@@ -43,6 +58,7 @@ class CamarasController extends ResourceController
 
     public function index(): mixed
     {
+        if ($d = $this->sinPermiso('leer')) return $d;
         $db = \Config\Database::connect();
         $q       = trim((string)$this->request->getGet('q'));
         $estado  = trim((string)$this->request->getGet('estado'));
@@ -83,6 +99,7 @@ class CamarasController extends ResourceController
 
     public function resumen(): mixed
     {
+        if ($d = $this->sinPermiso('leer')) return $d;
         $db = \Config\Database::connect();
 
         $c = $db->query("
@@ -114,6 +131,7 @@ class CamarasController extends ResourceController
 
     public function show($id = null): mixed
     {
+        if ($d = $this->sinPermiso('leer')) return $d;
         $db  = \Config\Database::connect();
         $cam = $db->query('SELECT * FROM camaras WHERE id = ? AND is_deleted = 0', [(int)$id])->getRowArray();
         if (!$cam) {
@@ -138,6 +156,7 @@ class CamarasController extends ResourceController
 
     public function create(): mixed
     {
+        if ($d = $this->sinPermiso('crear')) return $d;
         [$idUsuario, $idOperador, $idAudit] = $this->actor();
         if (!$idUsuario && !$idOperador) {
             return $this->respond(['status' => 'error', 'message' => 'Operador no identificado'], 401);
@@ -216,6 +235,7 @@ class CamarasController extends ResourceController
 
     public function actualizar($id = null): mixed
     {
+        if ($d = $this->sinPermiso('actualizar')) return $d;
         $actor = $this->request->jwtUser;
         $db    = \Config\Database::connect();
 
@@ -263,6 +283,7 @@ class CamarasController extends ResourceController
 
     public function delete($id = null): mixed
     {
+        if ($d = $this->sinPermiso('eliminar')) return $d;
         $actor = $this->request->jwtUser;
         $db    = \Config\Database::connect();
         $db->table('camaras')->where('id', (int)$id)->update(['is_deleted' => 1]);
@@ -274,6 +295,7 @@ class CamarasController extends ResourceController
 
     public function tickets(): mixed
     {
+        if ($d = $this->sinPermiso('leer')) return $d;
         $db      = \Config\Database::connect();
         $estatus = trim((string)$this->request->getGet('estatus'));
         $idCam   = (int)$this->request->getGet('id_camara');
@@ -307,6 +329,7 @@ class CamarasController extends ResourceController
 
     public function crearTicket($idCamara = null): mixed
     {
+        if ($d = $this->sinPermiso('crear')) return $d;
         [$idUsuario, $idOperador, $idAudit] = $this->actor();
         if (!$idUsuario && !$idOperador) {
             return $this->respond(['status' => 'error', 'message' => 'Operador no identificado'], 401);
@@ -353,6 +376,7 @@ class CamarasController extends ResourceController
 
     public function ticketDetalle($id = null): mixed
     {
+        if ($d = $this->sinPermiso('leer')) return $d;
         $db = \Config\Database::connect();
 
         $t = $db->query("
@@ -383,6 +407,7 @@ class CamarasController extends ResourceController
 
     public function comentarTicket($id = null): mixed
     {
+        if ($d = $this->sinPermiso('actualizar')) return $d;
         $actor = $this->request->jwtUser;
         $db    = \Config\Database::connect();
 
@@ -442,78 +467,10 @@ class CamarasController extends ResourceController
 
     /* ═══════════════════ HELPERS ═══════════════════ */
 
-    private const ESTADOS_MX = [
-        'Ciudad de México', 'Aguascalientes', 'Baja California Sur', 'Baja California', 'Campeche', 'Chiapas',
-        'Chihuahua', 'Coahuila', 'Colima', 'Durango', 'Guanajuato', 'Guerrero', 'Hidalgo', 'Jalisco',
-        'Michoacán', 'Morelos', 'Nayarit', 'Nuevo León', 'Oaxaca', 'Puebla', 'Querétaro', 'Quintana Roo',
-        'San Luis Potosí', 'Sinaloa', 'Sonora', 'Tabasco', 'Tamaulipas', 'Tlaxcala', 'Veracruz', 'Yucatán',
-        'Zacatecas', 'México',
-    ];
-
-    /**
-     * Reverse geocoding con Nominatim (OpenStreetMap). Es un servicio gratuito
-     * que pide identificarse con User-Agent y no abusar (máx 1 petición/seg);
-     * aquí solo se llama una vez por alta de cámara.
-     * Si falla (sin internet, timeout) devuelve [] y el alta sigue sin esos datos.
-     */
+    /** Detecta estado y dirección a partir de coordenadas (ver GeoLibrary). */
     private function geocodificarInterno(float $lat, float $lon): array
     {
-        try {
-            $client = \Config\Services::curlrequest(['timeout' => 6, 'http_errors' => false]);
-            $resp   = $client->get('https://nominatim.openstreetmap.org/reverse', [
-                'headers' => [
-                    'User-Agent'      => 'SIAG-Camaras/1.0 (serprosep.vinculasag.com)',
-                    'Accept-Language' => 'es',
-                ],
-                'query' => [
-                    'format' => 'jsonv2', 'lat' => $lat, 'lon' => $lon,
-                    'zoom' => 18, 'addressdetails' => 1,
-                ],
-            ]);
-            if ($resp->getStatusCode() !== 200) return [];
-
-            $json = json_decode($resp->getBody(), true);
-            $a    = $json['address'] ?? null;
-            if (!$a) return [];
-
-            // Estado de la república normalizado a nuestra lista
-            // ("Estado de México" → "México", "Veracruz de Ignacio de la Llave" → "Veracruz"...)
-            $estado = null;
-            $crudo  = (string)($a['state'] ?? $a['region'] ?? '');
-            if ($crudo !== '') {
-                $estado = $crudo;
-                foreach (self::ESTADOS_MX as $e) {
-                    if (mb_stripos($crudo, $e) !== false) { $estado = $e; break; }
-                }
-                if (mb_stripos($crudo, 'Distrito Federal') !== false) $estado = 'Ciudad de México';
-            }
-
-            // Dirección corta: calle + número, colonia, municipio/ciudad
-            $calle = trim(($a['road'] ?? $a['pedestrian'] ?? '') . ' ' . ($a['house_number'] ?? ''));
-            $col   = $a['suburb'] ?? $a['neighbourhood'] ?? $a['quarter'] ?? '';
-            $muni  = $a['city'] ?? $a['town'] ?? $a['village'] ?? $a['municipality'] ?? $a['county'] ?? '';
-            $partes = array_values(array_filter([$calle, $col, $muni], fn($p) => trim((string)$p) !== ''));
-            $direccion = $partes ? implode(', ', $partes) : null;
-
-            return ['estado' => $estado, 'direccion' => $direccion];
-        } catch (\Throwable $e) {
-            log_message('error', 'Geocodificación falló: ' . $e->getMessage());
-            return [];
-        }
-    }
-
-    /**
-     * Quién hace la acción: usuario del panel (JWT) u operador del kiosko
-     * (id_operador en el body, igual que id_capturista en biometrico/registro).
-     * @return array [idUsuario|null, idOperador|null, idParaAuditoria]
-     */
-    private function actor(): array
-    {
-        $u = $this->request->jwtUser ?? null;
-        if ($u) return [(int)$u->id, null, (int)$u->id];
-
-        $op = (int)$this->request->getVar('id_operador');
-        return [null, $op > 0 ? $op : null, $op];
+        return GeoLibrary::reverse($lat, $lon);
     }
 
     /**
