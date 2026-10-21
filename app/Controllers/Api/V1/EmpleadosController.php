@@ -833,11 +833,11 @@ class EmpleadosController extends ResourceController
     public function update($id = null): mixed
     {
         $actor = $this->request->jwtUser;
-        // Nivel 3+ (operador): solo datos personales y contacto de emergencia.
-        // Trabajo (puesto/turno/sueldo) y Banco son de nivel 2 o superior.
+        // Nivel 3+ (operador): datos personales, contacto de emergencia y datos laborales.
+        // Los datos bancarios son de nivel 2 o superior.
         $esOperador = (int)($actor->nivel ?? 99) > 2;
-        if ($esOperador && in_array($this->request->getVar('tipo'), ['trabajo', 'banco'], true)) {
-            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para modificar datos laborales ni bancarios'], 403);
+        if ($esOperador && $this->request->getVar('tipo') === 'banco') {
+            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para modificar datos bancarios'], 403);
         }
         $model = new EmpleadoModel();
         $tipo  = $this->request->getVar('tipo');
