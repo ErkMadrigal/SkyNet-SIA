@@ -139,6 +139,24 @@ class BiometricoController extends ResourceController
         $configTurno = $configTurnos[$idTurno] ?? null;
         $ahora       = new \DateTime('now', new \DateTimeZone('America/Mexico_City'));
 
+        // Registro hecho SIN internet en el kiosko: llega horas después pero
+        // con la hora real en que se checó (fecha_local, ISO 8601). Se acepta
+        // solo si es de los últimos 7 días y no está en el futuro, para que
+        // retardos/salidas se calculen con la hora verdadera.
+        $fechaLocalRaw = trim((string)($this->request->getVar('fecha_local') ?? ''));
+        $esOffline     = false;
+        if ($fechaLocalRaw !== '') {
+            try {
+                $fl  = new \DateTime($fechaLocalRaw);
+                $fl->setTimezone(new \DateTimeZone('America/Mexico_City'));
+                $dif = $ahora->getTimestamp() - $fl->getTimestamp();
+                if ($dif >= -300 && $dif <= 7 * 86400) {
+                    $ahora     = $fl;
+                    $esOffline = true;
+                }
+            } catch (\Exception $e) { /* fecha inválida: se usa la actual */ }
+        }
+
         // ── Validar doble entrada/salida ──────────────────────────
         $ultima     = $model->ultimaAsistencia($idEmpleado);
         $lastStatus = (int)(($ultima['data'] ?? [])['id_status'] ?? 0);
@@ -298,6 +316,8 @@ class BiometricoController extends ResourceController
                 'estado_entrada'        => $estadoEntrada,
                 'minutos_retardo'       => $minutosRetardo,
                 'id_asistencia_entrada' => $nuevoStatus === 2 ? ($ultimaEntrada['id'] ?? null) : null,
+                'fecha'                 => $ahora->format('Y-m-d'),
+                'hora'                  => $ahora->format('H:i:s'),
             ]
         );
 

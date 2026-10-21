@@ -198,6 +198,16 @@ class UsuarioModel extends Model
         // matriz, ESOS son los únicos que cuentan. Las vistas por defecto del
         // rol (operador = empleados, incidencias, biométrico...) solo aplican
         // a usuarios que no tienen matriz asignada.
+        // Base del Operador (nivel 3): siempre puede ver/crear/actualizar
+        // empleados (solo datos personales; el backend le bloquea trabajo y
+        // banco) y ver/crear incidencias. Se suma a lo de su matriz.
+        if ($idRol === 3) {
+            $granulares = array_merge($granulares, [
+                'empleados.leer', 'empleados.crear', 'empleados.actualizar',
+                'incidencias.leer', 'incidencias.crear',
+            ]);
+        }
+
         // Administrador (rol 2): todo el poder = vistas del rol + lo individual.
         if ($idRol === 2) {
             $slugs = array_merge(
@@ -211,7 +221,7 @@ class UsuarioModel extends Model
                 $granulares
             );
         } else {
-            $slugs = array_column($vistasRol, 'slug');
+            $slugs = array_merge(array_column($vistasRol, 'slug'), $granulares);
         }
 
         return array_values(array_unique($slugs));

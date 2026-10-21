@@ -49,6 +49,23 @@ class IncidenciaModel extends Model
         return ['status' => 'ok', 'data' => $data];
     }
 
+    /** Incidencias de un empleado (para su perfil). */
+    public function porEmpleado(int $idEmpleado): array
+    {
+        $data = $this->db->query("
+            SELECT i.id, i.activo, m.valor AS tipo, i.descripcion,
+                   i.fecha_inicio, i.fecha_final,
+                   i.comprobante_nombre_original, i.comprobante_ruta
+            FROM incidencias i
+            LEFT JOIN multicatalogo m ON m.id = i.id_tipo_incidencia
+            WHERE i.id_empleado = ?
+            ORDER BY i.id DESC
+            LIMIT 200
+        ", [$idEmpleado])->getResultArray();
+
+        return ['status' => 'ok', 'data' => $data];
+    }
+
     public function listarTodas(string $estado = 'todas'): array
     {
         $where = match($estado) {

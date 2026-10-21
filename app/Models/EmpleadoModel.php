@@ -23,7 +23,7 @@ class EmpleadoModel extends Model
         'clave_interbancaria','id_banco','estatus','alergias','fotos',
         'tipoSangre','escolaridad','parentesco','nombreEmergencia',
         'telefonoEmergencia','created_by','updated_at','updated_by',
-        'deleted_at','deleted_by','is_deleted','estado_actual','ultima_actividad','acceso_biometrico'
+        'deleted_at','deleted_by','is_deleted','estado_actual','ultima_actividad','acceso_biometrico','permitir_salida_anticipada'
     ];
 
     protected $useTimestamps = false;
@@ -522,8 +522,9 @@ class EmpleadoModel extends Model
         try {
             $data = [
                 'id_empleado'   => $idEmpleado,
-                'fecha'         => date('Y-m-d'),
-                'hora'          => date('H:i:s'),
+                // Hora de México (el servidor corre en UTC: date() daría +6 h)
+                'fecha'         => $extra['fecha'] ?? (new \DateTime('now', new \DateTimeZone('America/Mexico_City')))->format('Y-m-d'),
+                'hora'          => $extra['hora']  ?? (new \DateTime('now', new \DateTimeZone('America/Mexico_City')))->format('H:i:s'),
                 'latitud'       => $lat,
                 'longitud'      => $lon,
                 'ip'            => $ip,

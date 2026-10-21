@@ -121,7 +121,7 @@ class IncidenciasController extends ResourceController
        HELPERS
     ───────────────────────────────────────── */
 
-    private function subirComprobante($archivo): array
+    protected function subirComprobante($archivo): array
     {
         $ext = strtolower(pathinfo($archivo->getName(), PATHINFO_EXTENSION));
         $permitidos = ['pdf', 'jpg', 'jpeg', 'png', 'webp'];
@@ -156,7 +156,7 @@ class IncidenciasController extends ResourceController
         ];
     }
 
-    private function validarFecha(?string $fecha): ?string
+    protected function validarFecha(?string $fecha): ?string
     {
         if (empty($fecha) || $fecha === '0000-00-00') return null;
 

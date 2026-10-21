@@ -31,8 +31,8 @@ class EmpleadosController extends ResourceController
     protected $format = 'json';
 
     /** URL base de fotos */
-    private string $fotoBaseUrl  = '';
-    private string $fotoBasePath = '';
+    protected string $fotoBaseUrl  = '';
+    protected string $fotoBasePath = '';
 
     public function __construct()
     {
@@ -171,7 +171,21 @@ class EmpleadosController extends ResourceController
             'fecha_ingreso'     => 'permit_empty|valid_date[Y-m-d]',
         ];
 
-        if (!$this->validate($rules)) {
+        $mensajes = [
+            'curp'          => ['required' => 'El CURP es obligatorio', 'max_length' => 'El CURP es demasiado largo (máx. 20)'],
+            'rfc'           => ['required' => 'El RFC es obligatorio', 'max_length' => 'El RFC es demasiado largo (máx. 15)'],
+            'nss'           => ['required' => 'El NSS es obligatorio', 'exact_length' => 'El NSS debe tener exactamente 11 dígitos', 'numeric' => 'El NSS solo debe llevar números'],
+            'cp'            => ['required' => 'El código postal es obligatorio', 'exact_length' => 'El código postal debe tener exactamente 5 dígitos', 'numeric' => 'El código postal solo debe llevar números'],
+            'paterno'       => ['required' => 'El apellido paterno es obligatorio', 'max_length' => 'El apellido paterno es demasiado largo'],
+            'materno'       => ['max_length' => 'El apellido materno es demasiado largo'],
+            'nombre'        => ['required' => 'El nombre es obligatorio', 'max_length' => 'El nombre es demasiado largo'],
+            'turno'         => ['required' => 'Selecciona un turno'],
+            'puesto'        => ['required' => 'Selecciona un puesto'],
+            'periodicidad'  => ['required' => 'Selecciona la periodicidad de pago'],
+            'fecha_ingreso' => ['valid_date' => 'La fecha de ingreso no es válida (usa AAAA-MM-DD)'],
+        ];
+
+        if (!$this->validate($rules, $mensajes)) {
             return $this->respond(['status' => 'error', 'message' => 'Datos inválidos', 'errors' => $this->validator->getErrors()], 422);
         }
 
@@ -183,12 +197,22 @@ class EmpleadosController extends ResourceController
         $nss  = preg_replace('/\D/', '', $this->request->getVar('nss'));
 
         $duplicados = [];
-        if ($model->buscarPorIdentidad($curp)) $duplicados[] = 'CURP';
-        if ($model->buscarPorIdentidad($rfc))  $duplicados[] = 'RFC';
-        if ($model->buscarPorIdentidad($nss))  $duplicados[] = 'NSS';
+        $erroresDup = [];
+        foreach (['curp' => ['CURP', $curp], 'rfc' => ['RFC', $rfc], 'nss' => ['NSS', $nss]] as $campo => [$etq, $valor]) {
+            $ex = $valor !== '' ? $model->buscarPorIdentidad($valor) : null;
+            if ($ex) {
+                $duplicados[] = $etq;
+                $quien = trim(($ex['nombre'] ?? '') . ' ' . ($ex['paterno'] ?? '') . ' ' . ($ex['materno'] ?? ''));
+                $erroresDup[$campo] = "Ya existe un empleado con este {$etq} (ID " . ($ex['id'] ?? '?') . ($quien !== '' ? ": {$quien}" : '') . ')';
+            }
+        }
 
         if ($duplicados) {
-            return $this->respond(['status' => 'error', 'message' => 'Ya existe un empleado con el mismo ' . implode(', ', $duplicados)], 409);
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Ya existe un empleado con el mismo ' . implode(', ', $duplicados),
+                'errors'  => $erroresDup,
+            ], 409);
         }
 
         // Foto
@@ -274,14 +298,14 @@ class EmpleadosController extends ResourceController
             $rfc   = strtoupper(trim($emp['rfc']  ?? ''));
             $nss   = preg_replace('/\D/', '', $emp['nss'] ?? '');
             $cp    = preg_replace('/\D/', '', $emp['cp']  ?? '');
-            $inter = preg_replace('/\D/', '', $emp['interbancaria'] ?? '');
+            $inter = preg_replace('/\D/', '', (string)($emp['interbancaria'] ?? ''));
 
             if (trim($emp['paterno'] ?? '') === '' || trim($emp['nombre'] ?? '') === '') $rowErr[] = 'Nombre incompleto';
             if ($curp === '')  $rowErr[] = 'CURP obligatorio';
-            if ($rfc === '')   $rowErr[] = 'RFC obligatorio';
+            // RFC y CLABE ya NO son obligatorios en la carga masiva (se pueden
+            // completar después); si vienen, sí se valida su formato.
             if ($nss === '')   $rowErr[] = 'NSS obligatorio';
             if ($cp === '')    $rowErr[] = 'CP obligatorio';
-            if ($inter === '') $rowErr[] = 'Clabe interbancaria obligatoria';
             if ($nss !== '' && !preg_match('/^\d{11}$/', $nss)) $rowErr[] = 'NSS inválido (11 dígitos)';
             if ($cp  !== '' && !preg_match('/^\d{5}$/', $cp))   $rowErr[] = 'CP inválido (5 dígitos)';
             if ($inter !== '' && !preg_match('/^\d{18}$/', $inter)) $rowErr[] = 'Clabe inválida (18 dígitos)';
@@ -289,15 +313,20 @@ class EmpleadosController extends ResourceController
             if (trim($emp['puesto']       ?? '') === '') $rowErr[] = 'Puesto obligatorio';
             if (trim($emp['periodicidad'] ?? '') === '') $rowErr[] = 'Periodicidad obligatoria';
 
-            // Duplicados en BD
+            // Duplicados en BD (indica con quién choca, para poder localizarlo)
             $dups = [];
-            if ($curp && $model->buscarPorIdentidad($curp)) $dups[] = 'CURP';
-            if ($rfc  && $model->buscarPorIdentidad($rfc))  $dups[] = 'RFC';
-            if ($nss  && $model->buscarPorIdentidad($nss))  $dups[] = 'NSS';
+            foreach (['CURP' => $curp, 'RFC' => $rfc, 'NSS' => $nss] as $campo => $valor) {
+                if ($valor === '') continue;
+                $ex = $model->buscarPorIdentidad($valor);
+                if ($ex) {
+                    $quien = trim(($ex['nombre'] ?? '') . ' ' . ($ex['paterno'] ?? '') . ' ' . ($ex['materno'] ?? ''));
+                    $dups[] = "{$campo} {$valor} ya existe (empleado ID " . ($ex['id'] ?? '?') . ($quien !== '' ? ": {$quien}" : '') . ')';
+                }
+            }
 
             if ($dups) {
                 $dupCount++;
-                $rowErr[] = 'Duplicado en BD: ' . implode(', ', $dups);
+                $rowErr[] = 'Duplicado en BD: ' . implode('; ', $dups);
             }
 
             $ok = count($rowErr) === 0;
@@ -345,7 +374,7 @@ class EmpleadosController extends ResourceController
 
             $datos = [
                 'curp'               => strtoupper(trim($emp['curp'])),
-                'rfc'                => strtoupper(trim($emp['rfc'])),
+                'rfc'                => strtoupper(trim($emp['rfc'] ?? '')),
                 'nss'                => preg_replace('/\D/', '', $emp['nss']),
                 'CP_fiscal'          => preg_replace('/\D/', '', $emp['cp']),
                 'fecha_ingreso'      => trim($emp['fecha_ingreso'] ?? date('Y-m-d')),
@@ -356,7 +385,7 @@ class EmpleadosController extends ResourceController
                 'id_turno'           => trim($emp['turno']),
                 'id_puesto'          => trim($emp['puesto']),
                 'id_periocidad'      => trim($emp['periodicidad']),
-                'clave_interbancaria' => preg_replace('/\D/', '', $emp['interbancaria']),
+                'clave_interbancaria' => (preg_replace('/\D/', '', (string)($emp['interbancaria'] ?? '')) ?: null),
                 'id_banco'           => trim($emp['institucionBancaria'] ?? ''),
                 'estatus'            => 1,
                 'alergias'           => trim($emp['alergias'] ?? 'N/A'),
@@ -795,9 +824,21 @@ class EmpleadosController extends ResourceController
      * PUT /api/v1/empleados/{id}
      * Body: { tipo:"personal"|"trabajo"|"banco", ...campos }
      */
+    /** GET /empleados/{id}/incidencias */
+    public function incidencias($id = null): mixed
+    {
+        return $this->respond((new \App\Models\IncidenciaModel())->porEmpleado((int)$id));
+    }
+
     public function update($id = null): mixed
     {
         $actor = $this->request->jwtUser;
+        // Nivel 3+ (operador): solo datos personales y contacto de emergencia.
+        // Trabajo (puesto/turno/sueldo) y Banco son de nivel 2 o superior.
+        $esOperador = (int)($actor->nivel ?? 99) > 2;
+        if ($esOperador && in_array($this->request->getVar('tipo'), ['trabajo', 'banco'], true)) {
+            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para modificar datos laborales ni bancarios'], 403);
+        }
         $model = new EmpleadoModel();
         $tipo  = $this->request->getVar('tipo');
 
@@ -835,6 +876,10 @@ class EmpleadosController extends ResourceController
                     'salario_mensual' => $this->request->getVar('salario_mensual') ?: null,
                     'updated_by'         => (int)$actor->id,
                 ];
+                // El operador no toca sueldo: se conserva lo que ya tenía.
+                if ($esOperador) {
+                    unset($datos['modo_sueldo'], $datos['salario_mensual']);
+                }
 
                 $res = $model->actualizarPersonal((int)$id, $datos);
                 break;
@@ -1047,20 +1092,29 @@ class EmpleadosController extends ResourceController
 
         $db = \Config\Database::connect();
 
+        // ?hoy=1 -> solo los registros del día de hoy (hora de México)
+        $filtroFecha = '';
+        $params      = [(int)$id];
+        if ($this->request->getVar('hoy')) {
+            $filtroFecha = ' AND a.fecha = ?';
+            $params[]    = (new \DateTime('now', new \DateTimeZone('America/Mexico_City')))->format('Y-m-d');
+        }
+
         $rows = $db->query("
             SELECT
                 a.id, a.fecha, a.hora, a.id_status,
                 CASE WHEN a.id_status = 1 THEN 'Entrada' WHEN a.id_status = 2 THEN 'Salida' ELSE 'Desconocido' END AS tipo,
+                a.latitud, a.longitud,
                 s.servicio AS ubicacion
             FROM asistencias a
             LEFT JOIN servicios s ON s.id = a.id_ubicacion
-            WHERE a.id_empleado = ?
+            WHERE a.id_empleado = ?{$filtroFecha}
             ORDER BY a.id DESC
             LIMIT ? OFFSET ?
-        ", [(int)$id, $limit, $offset])->getResultArray();
+        ", array_merge($params, [$limit, $offset]))->getResultArray();
 
         $total = (int)$db->query(
-            'SELECT COUNT(*) AS t FROM asistencias WHERE id_empleado = ?', [(int)$id]
+            'SELECT COUNT(*) AS t FROM asistencias a WHERE a.id_empleado = ?' . $filtroFecha, $params
         )->getRowArray()['t'];
 
         return $this->respond([
@@ -1143,7 +1197,7 @@ class EmpleadosController extends ResourceController
        HELPER PRIVADO
     ═══════════════════════════════════════════════════════════════ */
 
-    private function subirFoto($archivo, string $curp): array
+    protected function subirFoto($archivo, string $curp): array
     {
         $mimePermitidos = ['image/jpeg' => 'jpg', 'image/png' => 'png'];
         $mime = $archivo->getMimeType();

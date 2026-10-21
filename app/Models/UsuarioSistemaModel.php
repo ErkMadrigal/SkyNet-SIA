@@ -49,6 +49,21 @@ class UsuarioSistemaModel extends Model
             return ['status' => 'ok', 'data' => []];
         }
 
+        // Empleado vinculado (usuario.id_empleado) con su número y nombre
+        $vinc = [];
+        foreach ($this->db->query("
+            SELECT u.id AS id_usuario, u.id_empleado,
+                   TRIM(CONCAT_WS(' ', e.nombre, e.paterno, e.materno)) AS empleado_nombre
+            FROM usuario u LEFT JOIN empleados e ON e.id = u.id_empleado
+            WHERE u.id_empleado IS NOT NULL
+        ")->getResultArray() as $v) $vinc[(int)$v['id_usuario']] = $v;
+        foreach ($usuarios as &$uv) {
+            $v = $vinc[(int)$uv['id']] ?? null;
+            $uv['id_empleado']      = $v['id_empleado'] ?? null;
+            $uv['empleado_nombre']  = $v['empleado_nombre'] ?? null;
+        }
+        unset($uv);
+
         // 2) Roles + permisos de TODOS los usuarios en UNA sola query
         // plana -- nada de subqueries por fila. Trae una fila por cada
         // combinación (empleado, rol, permiso).
@@ -168,6 +183,13 @@ class UsuarioSistemaModel extends Model
             ", [$id])->getRowArray();
 
             if (!$row) return $this->fail('Usuario no encontrado');
+
+            $v = $this->db->query("
+                SELECT u.id_empleado, TRIM(CONCAT_WS(' ', e.nombre, e.paterno, e.materno)) AS empleado_nombre
+                FROM usuario u LEFT JOIN empleados e ON e.id = u.id_empleado WHERE u.id = ?
+            ", [$id])->getRowArray();
+            $row['id_empleado']     = $v['id_empleado'] ?? null;
+            $row['empleado_nombre'] = $v['empleado_nombre'] ?? null;
 
             $decoded = json_decode($row['roles_permisos'] ?? '[]', true);
             $row['roles_permisos'] = is_array($decoded) ? $decoded : [];
@@ -339,5 +361,39 @@ class UsuarioSistemaModel extends Model
             ->update(['estatus' => $nuevo]);
 
         return ['estatus' => $nuevo];
+    }
+
+    /** Busca empleados activos por número, nombre, CURP o RFC y dice si ya están vinculados a un usuario. */
+    public function buscarEmpleados(string $q): array
+    {
+        $q = trim($q);
+        if (mb_strlen($q) < 2) return $this->ok([]);
+        $like = '%' . $this->db->escapeLikeString($q) . '%';
+        $rows = $this->db->query("
+            SELECT e.id, TRIM(CONCAT_WS(' ', e.nombre, e.paterno, e.materno)) AS nombre, e.curp, e.rfc, e.nombre AS n, e.paterno, e.materno,
+                   (SELECT u.name_user FROM usuario u WHERE u.id_empleado = e.id AND u.is_deleted = 0 LIMIT 1) AS vinculado_a
+            FROM empleados e
+            WHERE e.estatus = 1 AND (
+                e.id = ? OR e.curp LIKE ? OR e.rfc LIKE ?
+                OR CONCAT_WS(' ', e.nombre, e.paterno, e.materno) LIKE ?
+            )
+            ORDER BY e.nombre LIMIT 15
+        ", [ctype_digit($q) ? (int)$q : 0, $like, $like, $like])->getResultArray();
+        return $this->ok($rows);
+    }
+
+    /** Vincula (o desvincula con null) un usuario del sistema con un empleado. */
+    public function vincularEmpleado(int $idUsuario, ?int $idEmpleado): array
+    {
+        try {
+            if ($idEmpleado !== null) {
+                $emp = $this->db->query('SELECT id FROM empleados WHERE id = ? AND estatus = 1', [$idEmpleado])->getRowArray();
+                if (!$emp) return $this->fail('El empleado no existe o está inactivo');
+                $otro = $this->db->query('SELECT name_user FROM usuario WHERE id_empleado = ? AND id <> ? AND is_deleted = 0 LIMIT 1', [$idEmpleado, $idUsuario])->getRowArray();
+                if ($otro) return $this->fail('Ese empleado ya está vinculado al usuario ' . $otro['name_user']);
+            }
+            $this->db->table('usuario')->where('id', $idUsuario)->update(['id_empleado' => $idEmpleado]);
+            return ['status' => 'ok'];
+        } catch (\Exception $e) { return $this->fail($e->getMessage()); }
     }
 }

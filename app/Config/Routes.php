@@ -122,6 +122,33 @@ $routes->group('api', function ($routes) {
            BIOMÉTRICO — Rutas PÚBLICAS para el kiosko
            (sin JWT — buscar y registrar asistencia)
         ───────────────────────────────────────────────── */
+        // Enrolamiento facial por link con token (sin login; el token es el acceso)
+        $routes->group('enrolamiento-publico', function ($routes) {
+            $routes->get('(:segment)',  'Api\V1\EnrolamientoController::info/$1');
+            $routes->post('(:segment)', 'Api\V1\EnrolamientoController::enrolarPublico/$1');
+        });
+
+        // Alta de empleados desde el kiosko (público; solo jefes de turno vía id_operador)
+        $routes->group('empleados-kiosko', function ($routes) {
+            $routes->get('catalogos', 'Api\V1\EmpleadosKioskoController::catalogos');
+            $routes->post('/',        'Api\V1\EmpleadosKioskoController::crearKiosko');
+            $routes->get('(:num)',    'Api\V1\EmpleadosKioskoController::detalle/$1');
+            $routes->post('(:num)/actualizar', 'Api\V1\EmpleadosKioskoController::actualizarKiosko/$1');
+        });
+
+        // Expediente digital desde el kiosko (público; queda pendiente de aprobación)
+        $routes->group('expediente-kiosko', function ($routes) {
+            $routes->post('/',    'Api\V1\ExpedienteKioskoController::subir');
+            $routes->get('mios',  'Api\V1\ExpedienteKioskoController::mios');
+        });
+
+        // Incidencias desde el kiosko (público; el operador va en id_operador)
+        $routes->group('incidencias-kiosko', function ($routes) {
+            $routes->get('motivos',   'Api\V1\IncidenciasKioskoController::motivos');
+            $routes->get('servicios', 'Api\V1\IncidenciasKioskoController::servicios');
+            $routes->post('/',        'Api\V1\IncidenciasKioskoController::crearKiosko');
+        });
+
         $routes->group('biometrico', function ($routes) {
             $routes->post('buscar',   'Api\V1\BiometricoController::buscar');
             $routes->post('buscar-login', 'Api\V1\BiometricoController::buscarLogin'); 
@@ -156,6 +183,15 @@ $routes->group('api', function ($routes) {
             $routes->patch('(:num)/salida-anticipada', 'Api\V1\EmpleadosController::toggleSalidaAnticipada/$1'); // NUEVO
             $routes->get('(:num)/estado-asistencia',   'Api\V1\EmpleadosController::estadoAsistencia/$1');       // NUEVO
             $routes->get('(:num)/asistencias',         'Api\V1\EmpleadosController::historialAsistencias/$1');   // NUEVO
+            $routes->get('(:num)/incidencias',         'Api\V1\EmpleadosController::incidencias/$1');            // NUEVO
+            $routes->get('(:num)/documentos',           'Api\V1\ExpedienteController::listar/$1');               // NUEVO -- expediente digital
+            $routes->post('(:num)/documentos',          'Api\V1\ExpedienteController::subir/$1');
+            $routes->get('documentos/(:num)/archivo',   'Api\V1\ExpedienteController::archivo/$1');
+            $routes->delete('documentos/(:num)',        'Api\V1\ExpedienteController::eliminar/$1');
+            $routes->post('documentos/(:num)/aprobar',  'Api\V1\ExpedienteController::aprobar/$1');
+            $routes->post('documentos/(:num)/rechazar', 'Api\V1\ExpedienteController::rechazar/$1');
+            $routes->post('(:num)/enrolar',            'Api\V1\EnrolamientoController::enrolarPanel/$1');       // NUEVO -- TF.js desde el panel
+            $routes->post('(:num)/enrolamiento-link',  'Api\V1\EnrolamientoController::generarLink/$1');        // NUEVO -- link para el empleado
             $routes->get('/',             'Api\V1\EmpleadosController::index');
             $routes->get('buscar',        'Api\V1\EmpleadosController::buscar');
             $routes->get('dashboard',     'Api\V1\EmpleadosController::dashboard');
@@ -356,6 +392,8 @@ $routes->group('api', function ($routes) {
         $routes->group('usuarios', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->get('/',                      'Api\V1\UsuariosSistemaController::index');
             $routes->get('roles',                  'Api\V1\UsuariosSistemaController::roles');
+            $routes->get('buscar-empleado',        'Api\V1\UsuariosSistemaController::buscarEmpleado');
+            $routes->patch('(:num)/empleado',      'Api\V1\UsuariosSistemaController::vincularEmpleado/$1');
             $routes->get('(:num)',                 'Api\V1\UsuariosSistemaController::show/$1');
             $routes->post('/',                     'Api\V1\UsuariosSistemaController::create');
             $routes->post('(:num)/roles',          'Api\V1\UsuariosSistemaController::asignarRoles/$1');
@@ -370,6 +408,8 @@ $routes->group('api', function ($routes) {
             $routes->get('resumen',     'Api\V1\DashboardController::resumen');
             $routes->get('zona/(:num)', 'Api\V1\DashboardController::zona/$1');
             $routes->get('control-area','Api\V1\DashboardController::controlArea');
+            $routes->get('mapa-servicios','Api\V1\DashboardController::mapaServicios');
+            $routes->get('mapa-servicios/(:num)/empleados','Api\V1\DashboardController::mapaServicioEmpleados/$1');
         });
 
         

@@ -38,6 +38,25 @@ class UsuariosSistemaController extends ResourceController
         return $this->respond((new UsuarioSistemaModel())->getUserById((int)$id));
     }
 
+    /** GET /api/v1/usuarios/buscar-empleado?q= */
+    public function buscarEmpleado(): mixed
+    {
+        return $this->respond((new UsuarioSistemaModel())->buscarEmpleados((string)($this->request->getVar('q') ?? '')));
+    }
+
+    /** PATCH /api/v1/usuarios/{id}/empleado   Body: { id_empleado: N | null } */
+    public function vincularEmpleado($id = null): mixed
+    {
+        $actor = $this->request->jwtUser;
+        if (!(int)$id) return $this->respond(['status' => 'error', 'message' => 'ID requerido'], 400);
+        $raw = $this->request->getVar('id_empleado');
+        $idEmp = ($raw === null || $raw === '' ) ? null : (int)$raw;
+        $res = (new UsuarioSistemaModel())->vincularEmpleado((int)$id, $idEmp);
+        if (($res['status'] ?? '') !== 'ok') return $this->respond($res, 409);
+        AuditLibrary::log((int)$actor->id, 'VINCULAR_EMPLEADO_USUARIO', 'usuario', (string)$id, $idEmp ? "Vinculado al empleado {$idEmp}" : 'Desvinculado del empleado');
+        return $this->respond(['status' => 'ok', 'message' => $idEmp ? 'Empleado vinculado' : 'Empleado desvinculado']);
+    }
+
     /** GET /api/v1/usuarios/roles */
     public function roles(): mixed
     {
@@ -83,6 +102,16 @@ class UsuariosSistemaController extends ResourceController
         }
 
         $model    = new UsuarioSistemaModel();
+
+        // Empleado vinculado (opcional): su número de empleado queda en usuario.id_empleado
+        $idEmpleado = (int)($this->request->getVar('id_empleado') ?? 0) ?: null;
+        if ($idEmpleado) {
+            $chk = $model->vincularEmpleado(0, $idEmpleado);   // 0 = ningún usuario: solo valida
+            if (($chk['status'] ?? '') !== 'ok') {
+                return $this->respond(['status' => 'error', 'message' => $chk['message'] ?? 'Empleado inválido'], 409);
+            }
+        }
+
         $userName = $model->generarUsername($nombre, $paterno, $materno);
 
         // Validar duplicados
@@ -107,6 +136,9 @@ class UsuariosSistemaController extends ResourceController
         if ($res['status'] !== 'ok') {
             return $this->respond($res, 500);
         }
+        if ($idEmpleado) {
+            $model->vincularEmpleado((int)$res['last_insert_id'], $idEmpleado);
+        }
 
         AuditLibrary::log((int)$actor->id, 'CREAR_USUARIO_SISTEMA', 'usuario', (string)($res['last_insert_id'] ?? ''), "Creó usuario {$userName} (nivel {$idRolSistema})");
 
@@ -116,6 +148,7 @@ class UsuariosSistemaController extends ResourceController
             'userName' => $userName,
             'password' => $password, // en claro para que el admin lo comunique
             'data'     => ['id' => $res['last_insert_id']],
+            'last_insert_id' => $res['last_insert_id'],
         ], 201);
     }
 
