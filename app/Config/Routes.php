@@ -330,6 +330,7 @@ $routes->group('api', function ($routes) {
             $routes->get('clientes',                 'Api\V1\CatalogosController::clientes');
             $routes->get('servicios',                'Api\V1\CatalogosController::servicios');
             $routes->post('servicios/masivo', 'Api\V1\CatalogosController::masivoServicios', ['filter' => ['jwt', 'importClave']]);
+            $routes->post('servicios/upsert-masivo', 'Api\V1\CatalogosController::upsertMasivoServicios', ['filter' => ['jwt', 'importClave']]);
 
         });
 

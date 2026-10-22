@@ -532,4 +532,124 @@ class CatalogosController extends ResourceController
             'detalle'    => $detalle,
         ]);
     }
+
+    /**
+     * POST /api/v1/catalogos/servicios/upsert-masivo
+     * Inserta y ACTUALIZA servicios en lote.
+     *   - Con `id` que ya existe  -> actualiza (las celdas vacías no se tocan).
+     *   - Con `id` que no existe  -> inserta conservando ese id.
+     *   - Sin `id`                -> inserta uno nuevo (error si ya hay ese servicio en esa zona).
+     * Body: { servicios:[...], validate_only:bool }
+     * Campos: id, servicio, elementos, ubicacion, cp, latitud, longitud,
+     *         id_cliente, id_empresa, id_partida, id_zona, estatus
+     */
+    public function upsertMasivoServicios(): mixed
+    {
+        $actor = $this->request->jwtUser;
+        $db    = \Config\Database::connect();
+        $body  = $this->request->getJSON(true);
+
+        $filas        = $body['servicios'] ?? [];
+        $validateOnly = (bool)($body['validate_only'] ?? false);
+        if (!is_array($filas) || !$filas) {
+            return $this->respond(['status' => 'error', 'message' => 'No se recibió el arreglo servicios[]'], 400);
+        }
+
+        $insertados = 0; $actualizados = 0; $errores = 0;
+        $detalle = [];
+        $vacio = fn($v) => $v === null || trim((string)$v) === '';
+
+        foreach ($filas as $idx => $s) {
+            $row = isset($s['_row']) ? (int)$s['_row'] : ($idx + 2);
+            $err = [];
+
+            $id        = $vacio($s['id'] ?? null) ? null : (int)$s['id'];
+            $servicio  = trim((string)($s['servicio'] ?? ''));
+            $cp        = preg_replace('/\D/', '', (string)($s['cp'] ?? ''));
+            $lat       = trim((string)($s['latitud']  ?? ''));
+            $lon       = trim((string)($s['longitud'] ?? ''));
+            $estatusIn = $s['estatus'] ?? null;
+
+            if ($id !== null && $id <= 0) $err[] = 'id inválido';
+            if ($cp !== '' && strlen($cp) !== 5) $err[] = 'CP inválido (5 dígitos)';
+            if ($lat !== '' && (!is_numeric($lat) || abs((float)$lat) > 90))   $err[] = 'latitud inválida';
+            if ($lon !== '' && (!is_numeric($lon) || abs((float)$lon) > 180))  $err[] = 'longitud inválida';
+            if (!$vacio($estatusIn) && !in_array((int)$estatusIn, [0, 1], true)) $err[] = 'estatus debe ser 0 o 1';
+
+            $existente = $id !== null ? $db->table('servicios')->where('id', $id)->get()->getRowArray() : null;
+
+            // Campos que llegan con valor
+            $campos = [];
+            if ($servicio !== '')                         $campos['servicio']   = $servicio;
+            if (!$vacio($s['elementos'] ?? null))         $campos['elementos']  = (int)$s['elementos'];
+            if (!$vacio($s['ubicacion'] ?? null))         $campos['ubicacion']  = trim((string)$s['ubicacion']);
+            if ($cp !== '')                               $campos['cp']         = $cp;
+            if ($lat !== '' && is_numeric($lat))          $campos['latitud']    = round((float)$lat, 6);
+            if ($lon !== '' && is_numeric($lon))          $campos['longitud']   = round((float)$lon, 6);
+            foreach (['id_cliente', 'id_empresa', 'id_partida', 'id_zona'] as $k) {
+                if (!$vacio($s[$k] ?? null)) $campos[$k] = (int)$s[$k];
+            }
+            if (!$vacio($estatusIn))                      $campos['estatus']    = (int)$estatusIn;
+
+            if ($existente === null) {
+                // INSERT: obligatorios
+                foreach (['servicio' => 'servicio', 'id_cliente' => 'id_cliente', 'id_empresa' => 'id_empresa', 'id_zona' => 'id_zona'] as $k => $et) {
+                    if (!isset($campos[$k])) $err[] = "{$et} obligatorio para crear";
+                }
+                if (!$err && $id === null) {
+                    $dup = $db->table('servicios')->where('servicio', $campos['servicio'])->where('id_zona', $campos['id_zona'])->where('estatus', 1)->get()->getRowArray();
+                    if ($dup) $err[] = "Ya existe ese servicio en esa zona (id {$dup['id']}); usa ese id para actualizarlo";
+                }
+            } elseif (!$campos) {
+                $err[] = 'No trae ningún dato para actualizar';
+            }
+
+            if ($err) {
+                $errores++;
+                $detalle[] = ['row' => $row, 'status' => 'error', 'message' => implode(' | ', $err)];
+                continue;
+            }
+
+            if ($validateOnly) {
+                $detalle[] = ['row' => $row, 'status' => 'ok', 'message' => $existente ? 'Se actualizaría' : 'Se insertaría'];
+                $existente ? $actualizados++ : $insertados++;
+                continue;
+            }
+
+            try {
+                if ($existente) {
+                    $campos['updated_at'] = date('Y-m-d H:i:s');
+                    $db->table('servicios')->where('id', $id)->update($campos);
+                    $actualizados++;
+                    $detalle[] = ['row' => $row, 'status' => 'ok', 'message' => 'Actualizado'];
+                } else {
+                    $ins = $campos + ['estatus' => 1];
+                    if ($id !== null) $ins['id'] = $id;
+                    $ins['created_at'] = date('Y-m-d H:i:s');
+                    $db->table('servicios')->insert($ins);
+                    $insertados++;
+                    $detalle[] = ['row' => $row, 'status' => 'ok', 'message' => 'Insertado'];
+                }
+            } catch (\Throwable $e) {
+                $errores++;
+                $detalle[] = ['row' => $row, 'status' => 'error', 'message' => 'BD: ' . $e->getMessage()];
+            }
+        }
+
+        if (!$validateOnly) {
+            \App\Libraries\AuditLibrary::log((int)$actor->id, 'SERVICIOS_UPSERT_MASIVO', 'servicios', '-',
+                "Carga masiva de servicios: {$insertados} nuevos, {$actualizados} actualizados, {$errores} con error");
+        }
+
+        return $this->respond([
+            'status'       => 'ok',
+            'message'      => $validateOnly ? 'Validación completada (sin guardar)' : 'Lote procesado',
+            'total'        => count($filas),
+            'insertados'   => $insertados,
+            'actualizados' => $actualizados,
+            'duplicados'   => 0,
+            'errores'      => $errores,
+            'detalle'      => $detalle,
+        ]);
+    }
 }
