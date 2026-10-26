@@ -540,6 +540,11 @@ class EmpleadoModel extends Model
             if (!empty($extra['estado_salida']))          $data['estado_salida']          = $extra['estado_salida'];
             if (!empty($extra['id_asistencia_entrada']))  $data['id_asistencia_entrada']  = $extra['id_asistencia_entrada'];
 
+            // Origen del registro (web / kiosko) — solo si la columna ya existe
+            if (!empty($extra['origen']) && $this->db->fieldExists('origen', 'asistencias')) {
+                $data['origen'] = $extra['origen'];
+            }
+
             $this->db->table('asistencias')->insert($data);
 
             $this->db->query("

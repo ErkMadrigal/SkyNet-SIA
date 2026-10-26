@@ -114,6 +114,23 @@ class BiometricoController extends ResourceController
         $salida      = filter_var($this->request->getVar('salida'), FILTER_VALIDATE_BOOLEAN);
         $nuevoStatus = $salida ? 2 : 1;
 
+        // ── Origen del registro (kiosko | web) ────────────────────
+        // Desde el navegador solo se acepta dentro del radio de un servicio dado de alta.
+        $origen = strtolower(trim((string)($this->request->getVar('origen') ?? 'kiosko')));
+        $origen = $origen === 'web' ? 'web' : 'kiosko';
+        $servicioWeb = null;
+        if ($origen === 'web') {
+            $radioWeb    = 300; // metros
+            $servicioWeb = $model->servicioMasCercano($lat, $lon, $radioWeb);
+            if (($servicioWeb['status'] ?? '') !== 'ok') {
+                return $this->respond([
+                    'status'  => 'error',
+                    'code'    => 'fuera_de_zona',
+                    'message' => 'Tu ubicación no está dentro de una zona o rango permitido (' . $radioWeb . ' m), o el servicio no está dado de alta.',
+                ], 403);
+            }
+        }
+
         // ── Obtener turno del empleado ────────────────────────────
         $db    = \Config\Database::connect();
         $turno = $db->query(
@@ -303,7 +320,7 @@ class BiometricoController extends ResourceController
         }
 
         // ── Registrar asistencia ──────────────────────────────────
-        $servicio   = $model->servicioMasCercano($lat, $lon, 500);
+        $servicio   = $origen === 'web' ? $servicioWeb : $model->servicioMasCercano($lat, $lon, 500);
         $idServicio = (int)(($servicio['data'] ?? [])['id'] ?? 0);
 
         $asistencia = $model->registrarAsistencia(
@@ -318,6 +335,7 @@ class BiometricoController extends ResourceController
                 'id_asistencia_entrada' => $nuevoStatus === 2 ? ($ultimaEntrada['id'] ?? null) : null,
                 'fecha'                 => $ahora->format('Y-m-d'),
                 'hora'                  => $ahora->format('H:i:s'),
+                'origen'                => $origen,
             ]
         );
 
@@ -332,7 +350,7 @@ class BiometricoController extends ResourceController
             $nuevoStatus === 1 ? 'BIOMETRICO_ENTRADA' : 'BIOMETRICO_SALIDA',
             'asistencias',
             (string)$idEmpleado,
-            ($nuevoStatus === 1 ? 'Entrada' : 'Salida') . " — turno: {$idTurno} — IP: {$ip}"
+            ($nuevoStatus === 1 ? 'Entrada' : 'Salida') . " — turno: {$idTurno} — IP: {$ip} — origen: {$origen}"
         );
 
         // ── Respuesta enriquecida ─────────────────────────────────

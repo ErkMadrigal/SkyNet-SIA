@@ -122,6 +122,10 @@ $routes->group('api', function ($routes) {
            BIOMÉTRICO — Rutas PÚBLICAS para el kiosko
            (sin JWT — buscar y registrar asistencia)
         ───────────────────────────────────────────────── */
+        // Versionamiento de la app del kiosko (público)
+        $routes->get('app/version',   'Api\V1\AppVersionController::version');
+        $routes->get('app/descargar', 'Api\V1\AppVersionController::descargar');
+
         // Enrolamiento facial por link con token (sin login; el token es el acceso)
         $routes->group('enrolamiento-publico', function ($routes) {
             $routes->get('(:segment)',  'Api\V1\EnrolamientoController::info/$1');
