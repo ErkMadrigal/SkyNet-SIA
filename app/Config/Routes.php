@@ -158,6 +158,7 @@ $routes->group('api', function ($routes) {
             $routes->post('buscar-login', 'Api\V1\BiometricoController::buscarLogin'); 
             $routes->post('registro', 'Api\V1\BiometricoController::registro');
             $routes->get('estado/(:num)', 'Api\V1\BiometricoController::estado/$1');
+            $routes->get('semana/(:num)', 'Api\V1\BiometricoController::semana/$1');
 
             $routes->get('sync',        'Api\V1\BiometricoController::sync');
             $routes->get('buscar-sync', 'Api\V1\BiometricoController::buscarSync');

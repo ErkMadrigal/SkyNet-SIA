@@ -378,6 +378,44 @@ class BiometricoController extends ResourceController
 
 
     /**
+     * GET /api/v1/biometrico/semana/:id  (público, como el resto del kiosko)
+     * Asistencias de la semana en curso (lunes a hoy, hora de México).
+     */
+    public function semana($id = null): mixed
+    {
+        $id = (int)$id;
+        if ($id <= 0) {
+            return $this->respond(['status' => 'error', 'message' => 'Empleado inválido'], 400);
+        }
+
+        $tz     = new \DateTimeZone('America/Mexico_City');
+        $hoy    = new \DateTime('now', $tz);
+        $lunes  = (clone $hoy)->modify('monday this week');
+        if ($hoy->format('N') === '1') { $lunes = clone $hoy; }
+        $domingo = (clone $lunes)->modify('+6 days');
+
+        $db   = \Config\Database::connect();
+        $rows = $db->query("
+            SELECT a.id, a.fecha, a.hora, a.id_status,
+                   CASE WHEN a.id_status = 1 THEN 'Entrada' WHEN a.id_status = 2 THEN 'Salida' ELSE 'Otro' END AS tipo,
+                   a.estado_entrada, a.minutos_retardo,
+                   s.servicio AS ubicacion
+            FROM asistencias a
+            LEFT JOIN servicios s ON s.id = a.id_ubicacion
+            WHERE a.id_empleado = ? AND a.fecha BETWEEN ? AND ?
+            ORDER BY a.fecha ASC, a.hora ASC, a.id ASC
+        ", [$id, $lunes->format('Y-m-d'), $domingo->format('Y-m-d')])->getResultArray();
+
+        return $this->respond([
+            'status' => 'ok',
+            'desde'  => $lunes->format('Y-m-d'),
+            'hasta'  => $domingo->format('Y-m-d'),
+            'total'  => count($rows),
+            'data'   => $rows,
+        ]);
+    }
+
+    /**
      * GET /api/v1/biometrico/estado/:id?salida=0|1
      * Verifica si el empleado puede registrar entrada/salida SIN registrar nada.
      */
@@ -765,7 +803,7 @@ class BiometricoController extends ResourceController
         // distancia). Si las 2 capturas del enrolamiento no se parecen
         // ni entre ellas, algo salió mal (movimiento, mala luz, etc.)
         // y no se guarda.
-        $UMBRAL = 0.376;
+        $UMBRAL = 0.5; // antes 0.376: demasiado estricto para 2 capturas seguidas del mismo rostro
 
         if ($distancia > $UMBRAL) {
             return $this->respond([
