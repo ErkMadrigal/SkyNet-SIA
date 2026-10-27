@@ -16,15 +16,42 @@ class AppVersionController extends ResourceController
 {
     protected $format = 'json';
 
+    /** Carpetas donde puede estar "app/" (según cómo esté montado el hosting). */
+    private function carpetas(): array
+    {
+        $ds = DIRECTORY_SEPARATOR;
+        return array_values(array_unique(array_filter([
+            rtrim(FCPATH, '/\\') . $ds . 'app' . $ds,
+            rtrim(ROOTPATH, '/\\') . $ds . 'public' . $ds . 'app' . $ds,
+            rtrim(ROOTPATH, '/\\') . $ds . 'app_publica' . $ds,
+            isset($_SERVER['DOCUMENT_ROOT']) ? rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . $ds . 'app' . $ds : null,
+        ])));
+    }
+
     public function version()
     {
-        $dir  = FCPATH . 'app' . DIRECTORY_SEPARATOR;
-        $json = is_file($dir . 'version.json') ? json_decode((string) file_get_contents($dir . 'version.json'), true) : null;
-        $apk  = $dir . 'kiosko_SIAG.apk';
-
+        $json = null;
+        $dir  = null;
+        foreach ($this->carpetas() as $d) {
+            if (is_file($d . 'version.json')) {
+                $raw  = (string) file_get_contents($d . 'version.json');
+                $raw  = preg_replace('/^\xEF\xBB\xBF/', '', $raw); // quita BOM
+                $json = json_decode($raw, true);
+                $dir  = $d;
+                if (is_array($json)) break;
+            }
+        }
         $urlExterna = is_array($json) ? trim((string) ($json['apk_url'] ?? '')) : '';
+        $apk        = $dir ? $dir . 'kiosko_SIAG.apk' : '';
+
         if (! is_array($json) || ($urlExterna === '' && ! is_file($apk))) {
-            return $this->respond(['status' => 'error', 'message' => 'Sin versión publicada'], 404);
+            return $this->respond([
+                'status'  => 'error',
+                'message' => 'Sin versión publicada',
+                'buscado' => $this->carpetas(),                       // diagnóstico
+                'json_ok' => is_array($json),
+                'json_error' => $dir ? json_last_error_msg() : 'version.json no encontrado',
+            ], 404);
         }
 
         return $this->respond([
@@ -42,8 +69,9 @@ class AppVersionController extends ResourceController
 
     public function descargar()
     {
-        $apk = FCPATH . 'app' . DIRECTORY_SEPARATOR . 'kiosko_SIAG.apk';
-        if (! is_file($apk)) {
+        $apk = '';
+        foreach ($this->carpetas() as $d) { if (is_file($d . 'kiosko_SIAG.apk')) { $apk = $d . 'kiosko_SIAG.apk'; break; } }
+        if ($apk === '') {
             return $this->respond(['status' => 'error', 'message' => 'APK no disponible'], 404);
         }
         return $this->response
