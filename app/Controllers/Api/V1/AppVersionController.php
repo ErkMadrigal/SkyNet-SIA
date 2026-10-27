@@ -22,7 +22,8 @@ class AppVersionController extends ResourceController
         $json = is_file($dir . 'version.json') ? json_decode((string) file_get_contents($dir . 'version.json'), true) : null;
         $apk  = $dir . 'kiosko_SIAG.apk';
 
-        if (! is_array($json) || ! is_file($apk)) {
+        $urlExterna = is_array($json) ? trim((string) ($json['apk_url'] ?? '')) : '';
+        if (! is_array($json) || ($urlExterna === '' && ! is_file($apk))) {
             return $this->respond(['status' => 'error', 'message' => 'Sin versión publicada'], 404);
         }
 
@@ -33,8 +34,8 @@ class AppVersionController extends ResourceController
                 'versionName' => (string) ($json['versionName'] ?? '1.0'),
                 'notas'       => (string) ($json['notas'] ?? ''),
                 'obligatoria' => (bool) ($json['obligatoria'] ?? false),
-                'tamano'      => filesize($apk),
-                'apk_url'     => site_url('api/v1/app/descargar'),
+                'tamano'      => (int) ($json['tamano'] ?? (is_file($apk) ? filesize($apk) : 0)),
+                'apk_url'     => $urlExterna !== '' ? $urlExterna : site_url('api/v1/app/descargar'),
             ],
         ]);
     }
