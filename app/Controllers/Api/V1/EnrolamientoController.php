@@ -38,6 +38,39 @@ class EnrolamientoController extends ResourceController
         return $this->guardar((int)$id, (int)$user->id);
     }
 
+    /**
+     * POST /api/v1/empleados/{id}/enrolamiento-reset
+     * Restablece el enrolamiento: borra el rostro activo para que la app lo mande a enrolarse
+     * de nuevo (por ejemplo cuando el enrolamiento anterior salió con poca nitidez).
+     */
+    public function reiniciar($id = null): mixed
+    {
+        $user = $this->request->jwtUser;
+        if ((int)($user->nivel ?? 99) > 2) {
+            return $this->respond(['status' => 'error', 'message' => 'Solo administradores pueden restablecer el enrolamiento'], 403);
+        }
+
+        $db  = \Config\Database::connect();
+        $emp = $db->table('empleados')->select('id')->where('id', (int)$id)->get()->getRowArray();
+        if (!$emp) {
+            return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
+        }
+
+        $db->transStart();
+        $db->table('empleado_rostro_embeddings')->where('id_empleado', (int)$id)->where('is_active', 1)->update(['is_active' => 0]);
+        $db->table('empleados')->where('id', (int)$id)->update(['rostro_enrolado' => 0]);
+        // Links de enrolamiento sin usar ya no aplican
+        $db->table('enrolamiento_tokens')->where('id_empleado', (int)$id)->where('used_at', null)->update(['expires_at' => date('Y-m-d H:i:s')]);
+        $db->transComplete();
+
+        if (!$db->transStatus()) {
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo restablecer el enrolamiento'], 500);
+        }
+
+        AuditLibrary::log((int)$user->id, 'ENROLAMIENTO_RESET', 'empleados', (string)$id, 'Restableció el enrolamiento facial (deberá enrolarse de nuevo)');
+        return $this->respond(['status' => 'ok', 'message' => 'Enrolamiento restablecido']);
+    }
+
     public function generarLink($id = null): mixed
     {
         $user = $this->request->jwtUser;
