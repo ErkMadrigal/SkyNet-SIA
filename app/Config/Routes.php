@@ -25,6 +25,7 @@ $routes->get('api/ping', function () {
         'version' => '1.0.0',
         'time'    => date('Y-m-d H:i:s'),
         'env'     => env('CI_ENVIRONMENT', 'production'),
+        'deploy'  => 'automatic',
     ], JSON_UNESCAPED_UNICODE);
 });
 
