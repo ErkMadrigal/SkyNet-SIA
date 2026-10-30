@@ -789,6 +789,7 @@ class BiometricoController extends ResourceController
         $idEmpleado = (int)($this->request->getVar('id_empleado') ?? 0);
         $descGuardar    = $this->request->getVar('descriptor_guardar');
         $descVerificar  = $this->request->getVar('descriptor_verificar');
+        $descFinal      = $this->request->getVar('descriptor_final'); // opcional: promedio de las capturas
         $idCapturista   = (int)($this->request->getVar('id_capturista') ?? 0) ?: null;
 
         if ($idEmpleado <= 0) {
@@ -807,6 +808,10 @@ class BiometricoController extends ResourceController
                 'message' => 'Se requieren descriptor_guardar y descriptor_verificar, cada uno con 128 valores',
             ], 422);
         }
+
+        // Descriptor que se guarda: el promedio de las capturas si viene y es válido
+        $descFinal = is_string($descFinal) ? json_decode($descFinal, true) : $descFinal;
+        $descAGuardar = (is_array($descFinal) && count($descFinal) === 128) ? $descFinal : $descGuardar;
 
         $db = \Config\Database::connect();
 
@@ -848,7 +853,7 @@ class BiometricoController extends ResourceController
 
         $db->table('empleado_rostro_embeddings')->insert([
             'id_empleado'            => $idEmpleado,
-            'descriptor'             => json_encode(array_values($descGuardar)),
+            'descriptor'             => json_encode(array_values($descAGuardar)),
             'distancia_verificacion' => round($distancia, 6),
             'is_active'              => 1,
             'id_capturista'          => $idCapturista,
