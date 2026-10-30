@@ -159,6 +159,7 @@ $routes->group('api', function ($routes) {
             $routes->post('registro', 'Api\V1\BiometricoController::registro');
             $routes->get('estado/(:num)', 'Api\V1\BiometricoController::estado/$1');
             $routes->get('semana/(:num)', 'Api\V1\BiometricoController::semana/$1');
+            $routes->get('permisos-app/(:num)', 'Api\V1\AppPermisosController::publico/$1');
 
             $routes->get('sync',        'Api\V1\BiometricoController::sync');
             $routes->get('buscar-sync', 'Api\V1\BiometricoController::buscarSync');
@@ -188,6 +189,8 @@ $routes->group('api', function ($routes) {
             $routes->patch('(:num)/salida-anticipada', 'Api\V1\EmpleadosController::toggleSalidaAnticipada/$1'); // NUEVO
             $routes->get('(:num)/estado-asistencia',   'Api\V1\EmpleadosController::estadoAsistencia/$1');       // NUEVO
             $routes->get('(:num)/asistencias',         'Api\V1\EmpleadosController::historialAsistencias/$1');   // NUEVO
+            $routes->get('(:num)/permisos-app',        'Api\V1\AppPermisosController::ver/$1');
+            $routes->post('(:num)/permisos-app',       'Api\V1\AppPermisosController::guardar/$1');
             $routes->get('(:num)/incidencias',         'Api\V1\EmpleadosController::incidencias/$1');            // NUEVO
             $routes->get('(:num)/documentos',           'Api\V1\ExpedienteController::listar/$1');               // NUEVO -- expediente digital
             $routes->post('(:num)/documentos',          'Api\V1\ExpedienteController::subir/$1');

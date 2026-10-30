@@ -76,6 +76,7 @@ class BiometricoController extends ResourceController
                 'nivel'    => (int)$operador['nivel'],
                 'vistas'   => $vistas,
             ] : null,
+            'permisos_app' => \App\Controllers\Api\V1\AppPermisosController::leer((int)$existe['id']),
         ]);
     }
 
@@ -113,6 +114,8 @@ class BiometricoController extends ResourceController
         $ip          = trim($this->request->getVar('ip'));
         $salida      = filter_var($this->request->getVar('salida'), FILTER_VALIDATE_BOOLEAN);
         $nuevoStatus = $salida ? 2 : 1;
+        // Salida antes de hora que el propio empleado CONFIRMÓ en el kiosko (sin internet)
+        $anticipadaConfirmada = filter_var($this->request->getVar('salida_anticipada_confirmada'), FILTER_VALIDATE_BOOLEAN);
 
         // ── Origen del registro (kiosko | web) ────────────────────
         // Desde el navegador solo se acepta dentro del radio de un servicio dado de alta.
@@ -258,7 +261,7 @@ class BiometricoController extends ResourceController
                 $ventanaMinima = clone $fechaSalida;
                 $ventanaMinima->modify('-15 minutes');
 
-                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp() && !$permitirSalidaAnticipada) {
+                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp() && !$permitirSalidaAnticipada && !$anticipadaConfirmada) {
                     $minutosRestantes = (int)(($ventanaMinima->getTimestamp() - $ahora->getTimestamp()) / 60);
                     $horas            = floor($minutosRestantes / 60);
                     $mins             = $minutosRestantes % 60;
@@ -288,6 +291,27 @@ class BiometricoController extends ResourceController
                             'minutos_restantes'  => $minutosRestantes,
                         ],
                     ], 423);
+                }
+
+                // Salida antes de hora CONFIRMADA por el empleado: se registra y se levanta
+                // una incidencia pendiente para que el jefe de turno la revise.
+                if ($anticipadaConfirmada && !$permitirSalidaAnticipada
+                    && $ahora->getTimestamp() < $ventanaMinima->getTimestamp()) {
+                    $minAntes = (int)(($fechaSalida->getTimestamp() - $ahora->getTimestamp()) / 60);
+                    try {
+                        $db->table('incidencias')->insert([
+                            'id_empleado' => $idEmpleado,
+                            'tipo'        => 'salida_anticipada',
+                            'descripcion' => "Salida anticipada confirmada por el empleado ({$minAntes} min antes del horario). Registrada sin conexión.",
+                            'fecha'       => $ahora->format('Y-m-d'),
+                            'hora'        => $ahora->format('H:i:s'),
+                            'estatus'     => 0,
+                            'activo'      => 1,
+                            'created_at'  => $ahora->format('Y-m-d H:i:s'),
+                        ]);
+                    } catch (\Exception $e) {
+                        log_message('error', 'Error incidencia salida anticipada confirmada: ' . $e->getMessage());
+                    }
                 }
 
                 // Si se usó la autorización de salida anticipada para pasar la
@@ -596,6 +620,7 @@ class BiometricoController extends ResourceController
                 e.acceso_biometrico,
                 e.id_ubicacion_principal,
                 e.rostro_enrolado,
+                e.permitir_salida_anticipada,
                 s.servicio AS ubicacion_nombre,
                 mp.valor AS puesto,
                 ere.descriptor AS descriptor_servidor
@@ -645,6 +670,7 @@ class BiometricoController extends ResourceController
                 e.acceso_biometrico,
                 e.id_ubicacion_principal,
                 e.rostro_enrolado,
+                e.permitir_salida_anticipada,
                 s.servicio AS ubicacion_nombre,
                 mp.valor AS puesto,
                 ere.descriptor AS descriptor_servidor
