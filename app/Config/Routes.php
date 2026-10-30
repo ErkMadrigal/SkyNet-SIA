@@ -199,6 +199,7 @@ $routes->group('api', function ($routes) {
             $routes->post('documentos/(:num)/aprobar',  'Api\V1\ExpedienteController::aprobar/$1');
             $routes->post('documentos/(:num)/rechazar', 'Api\V1\ExpedienteController::rechazar/$1');
             $routes->post('(:num)/enrolar',            'Api\V1\EnrolamientoController::enrolarPanel/$1');       // NUEVO -- TF.js desde el panel
+            $routes->post('(:num)/enrolamiento-reset', 'Api\V1\EnrolamientoController::reiniciar/$1');   // NUEVO -- restablecer enrolamiento
             $routes->post('(:num)/enrolamiento-link',  'Api\V1\EnrolamientoController::generarLink/$1');        // NUEVO -- link para el empleado
             $routes->get('/',             'Api\V1\EmpleadosController::index');
             $routes->get('buscar',        'Api\V1\EmpleadosController::buscar');
