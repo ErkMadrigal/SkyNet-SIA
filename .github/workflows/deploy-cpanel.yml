@@ -17,6 +17,17 @@ jobs:
     env:
       REPO_ROOT: /home1/santi299/repositories/SkyNet-SIA
     steps:
+      - name: Verificar secretos
+        env:
+          CPANEL_HOST: ${{ secrets.CPANEL_HOST }}
+          CPANEL_USER: ${{ secrets.CPANEL_USER }}
+          CPANEL_TOKEN: ${{ secrets.CPANEL_TOKEN }}
+        run: |
+          for v in CPANEL_HOST CPANEL_USER CPANEL_TOKEN; do
+            if [ -z "${!v}" ]; then echo "::error::Falta el secreto $v (Settings > Secrets and variables > Actions > Repository secrets de ESTE repo)"; exit 1; fi
+          done
+          echo "Secretos presentes"
+
       - name: Actualizar repositorio en cPanel (git pull)
         run: |
           curl -fsS -H "Authorization: cpanel ${{ secrets.CPANEL_USER }}:${{ secrets.CPANEL_TOKEN }}" \
