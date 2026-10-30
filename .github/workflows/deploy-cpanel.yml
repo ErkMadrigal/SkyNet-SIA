@@ -1,0 +1,23 @@
+# Deploy automático del backend: al hacer push a master, cPanel hace "Update from Remote"
+# (git pull) en el repositorio donde corre el API. No necesita copiar archivos.
+#
+# Secrets requeridos en GitHub (Settings → Secrets and variables → Actions):
+#   CPANEL_HOST   → host donde abre cPanel del servidor del API (puerto 2083)
+#   CPANEL_USER   → santi299
+#   CPANEL_TOKEN  → API Token de cPanel (cPanel → Security → Manage API Tokens)
+name: Deploy backend (cPanel)
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      REPO_ROOT: /home1/santi299/repositories/SkyNet-SIA
+    steps:
+      - name: Actualizar repositorio en cPanel (git pull)
+        run: |
+          curl -fsS -H "Authorization: cpanel ${{ secrets.CPANEL_USER }}:${{ secrets.CPANEL_TOKEN }}" \
+            "https://${{ secrets.CPANEL_HOST }}:2083/execute/VersionControl/update?repository_root=${REPO_ROOT}&branch=master"

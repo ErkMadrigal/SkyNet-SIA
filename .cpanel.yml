@@ -1,0 +1,7 @@
+---
+# El API corre directamente desde esta carpeta (repositories/SkyNet-SIA): con "Update from Remote"
+# (git pull) el código ya queda actualizado. No hay nada que copiar, por eso la tarea es un no-op.
+# (Este archivo solo existe para que cPanel habilite el botón "Deploy HEAD Commit".)
+deployment:
+  tasks:
+    - /bin/true
