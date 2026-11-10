@@ -61,7 +61,8 @@ class EmpleadosController extends ResourceController
         $status   = $this->request->getVar('status');
         $ubicacion = $this->request->getVar('ubicacion') ? (int)$this->request->getVar('ubicacion') : null; // ← nuevo
 
-        $resultado = $model->listar($limit, $offset, (array)$zonas, (array)$puestos, $fechas, $status, $ubicacion); // ← pásalo
+        $resultado = $model->listar($limit, $offset, (array)$zonas, (array)$puestos, $fechas, $status, $ubicacion,
+            \App\Libraries\AlcanceLibrary::de($this->request->jwtUser ?? null)); // ← pásalo
 
         return $this->respond([
             'status'      => 'ok',
@@ -86,6 +87,12 @@ class EmpleadosController extends ResourceController
             return $this->respond($result, 404);
         }
 
+        // Roles finos: un usuario limitado a ciertas zonas/clientes no abre empleados de otras
+        $alc = \App\Libraries\AlcanceLibrary::de($this->request->jwtUser ?? null);
+        if ($alc && !\App\Libraries\AlcanceLibrary::permiteServicio($alc, (int)($result['data']['id_ubicacion_principal'] ?? 0))) {
+            return $this->respond(['status' => 'error', 'message' => 'Este empleado está fuera de tu alcance (zona/cliente)'], 403);
+        }
+
         return $this->respond($result);
     }
 
@@ -99,7 +106,7 @@ class EmpleadosController extends ResourceController
         $limit  = (int)($this->request->getVar('limit')  ?? 50);
         $offset = (int)($this->request->getVar('offset') ?? 0);
 
-        return $this->respond($model->buscar($search, $limit, $offset));
+        return $this->respond($model->buscar($search, $limit, $offset, \App\Libraries\AlcanceLibrary::de($this->request->jwtUser ?? null)));
     }
 
     /**
@@ -1100,11 +1107,19 @@ class EmpleadosController extends ResourceController
             $params[]    = (new \DateTime('now', new \DateTimeZone('America/Mexico_City')))->format('Y-m-d');
         }
 
+        // minutos_anticipada puede no existir aún (migracion_salida_anticipada.sql)
+        $colMinAnt = $db->fieldExists('minutos_anticipada', 'asistencias') ? 'a.minutos_anticipada' : 'NULL';
+
+        $colEvid = $db->tableExists('asistencias_evidencia')
+            ? 'EXISTS(SELECT 1 FROM asistencias_evidencia ev WHERE ev.id_asistencia = a.id)'
+            : '0';
+
         $rows = $db->query("
             SELECT
-                a.id, a.fecha, a.hora, a.id_status,
+                a.id, a.fecha, a.hora, a.id_status, {$colEvid} AS tiene_evidencia,
                 CASE WHEN a.id_status = 1 THEN 'Entrada' WHEN a.id_status = 2 THEN 'Salida' ELSE 'Desconocido' END AS tipo,
                 a.latitud, a.longitud,
+                a.estado_salida, {$colMinAnt} AS minutos_anticipada,
                 s.servicio AS ubicacion
             FROM asistencias a
             LEFT JOIN servicios s ON s.id = a.id_ubicacion
@@ -1121,6 +1136,53 @@ class EmpleadosController extends ResourceController
             'status' => 'ok',
             'data'   => $rows,
             'total'  => $total,
+        ]);
+    }
+
+    /**
+     * GET /api/v1/empleados/{id}/ubicaciones?dias=30
+     *
+     * Dónde ha checado este empleado: servicios (con # de registros y días), y los puntos
+     * GPS de cada registro para dibujarlos en un mapa. Sirve para ver a quien cubre varios
+     * puestos o cambia mucho de sitio.
+     */
+    public function historialUbicaciones($id = null): mixed
+    {
+        $dias = max(1, min(180, (int)($this->request->getVar('dias') ?? 30)));
+        $db   = \Config\Database::connect();
+
+        $servicios = $db->query("
+            SELECT a.id_ubicacion AS id_servicio, s.servicio, s.latitud AS lat, s.longitud AS lon,
+                   COUNT(*) AS registros, COUNT(DISTINCT a.fecha) AS dias,
+                   MIN(a.fecha) AS primera, MAX(a.fecha) AS ultima
+            FROM asistencias a
+            LEFT JOIN servicios s ON s.id = a.id_ubicacion
+            WHERE a.id_empleado = ? AND a.fecha >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+            GROUP BY a.id_ubicacion, s.servicio, s.latitud, s.longitud
+            ORDER BY registros DESC
+        ", [(int)$id, $dias])->getResultArray();
+
+        $puntos = $db->query("
+            SELECT a.fecha, a.hora, a.id_status, a.latitud AS lat, a.longitud AS lon, s.servicio
+            FROM asistencias a
+            LEFT JOIN servicios s ON s.id = a.id_ubicacion
+            WHERE a.id_empleado = ? AND a.fecha >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+              AND a.latitud IS NOT NULL AND a.latitud <> 0
+            ORDER BY a.fecha DESC, a.hora DESC
+            LIMIT 400
+        ", [(int)$id, $dias])->getResultArray();
+
+        $conServicio = array_filter($servicios, fn($x) => !empty($x['id_servicio']));
+
+        return $this->respond([
+            'status' => 'ok',
+            'dias'   => $dias,
+            'data'   => [
+                'servicios'      => $servicios,
+                'puntos'         => $puntos,
+                'servicios_distintos' => count($conServicio),
+                'varios_puestos' => count($conServicio) >= 3,
+            ],
         ]);
     }
 

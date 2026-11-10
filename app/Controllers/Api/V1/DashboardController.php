@@ -9,14 +9,34 @@ class DashboardController extends ResourceController
 {
     protected $format = 'json';
 
+    /** Hoy en hora de México (el servidor corre en UTC: date() daría el día equivocado de noche). */
+    private function hoy(): string
+    {
+        return (new \DateTime('now', new \DateTimeZone('America/Mexico_City')))->format('Y-m-d');
+    }
+
+    /** Caché corta (60 s) para que abrir el dashboard muchas veces no repita consultas pesadas. */
+    private function cacheado(string $clave, callable $calcular, int $ttl = 60): array
+    {
+        try {
+            $c = cache();
+            if (($hit = $c->get($clave)) !== null) return $hit;
+            $res = $calcular();
+            if (($res['status'] ?? '') === 'ok') $c->save($clave, $res, $ttl);
+            return $res;
+        } catch (\Throwable $e) {
+            return $calcular();
+        }
+    }
+
     /* ─────────────────────────────────────────
        GET /api/v1/dashboard/resumen
     ───────────────────────────────────────── */
     public function resumen(): mixed
     {
-        $hoy    = date('Y-m-d');
+        $hoy    = $this->hoy();
         $model  = new DashboardModel();
-        $result = $model->resumen($hoy);
+        $result = $this->cacheado("dash_resumen_{$hoy}", fn() => $model->resumen($hoy));
 
         if ($result['status'] !== 'ok') {
             return $this->respond($result, 500);
@@ -34,9 +54,9 @@ class DashboardController extends ResourceController
     ───────────────────────────────────────── */
     public function zona(int $idZona): mixed
     {
-        $hoy    = date('Y-m-d');
+        $hoy    = $this->hoy();
         $model  = new DashboardModel();
-        $result = $model->zona($idZona, $hoy);
+        $result = $this->cacheado("dash_zona_{$idZona}_{$hoy}", fn() => $model->zona($idZona, $hoy));
 
         if ($result['status'] !== 'ok') {
             return $this->respond($result, 500);
@@ -56,9 +76,9 @@ class DashboardController extends ResourceController
     ───────────────────────────────────────── */
     public function controlArea(): mixed
     {
-        $hoy    = date('Y-m-d');
+        $hoy    = $this->hoy();
         $model  = new DashboardModel();
-        $result = $model->controlArea($hoy);
+        $result = $this->cacheado("dash_control_area_{$hoy}", fn() => $model->controlArea($hoy));
 
         if ($result['status'] !== 'ok') {
             return $this->respond($result, 500);

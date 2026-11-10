@@ -29,22 +29,39 @@ class EmpleadosKioskoController extends EmpleadosController
         ]]);
     }
 
-    /** Usuario SIAG activo ligado al empleado operador (jefe de turno), o null. */
-    private function jefe(): ?array
+    /**
+     * Operador autorizado, o null. Basta con UNA de dos cosas: tener usuario SIAG activo (jefe de turno)
+     * o que el panel le haya dado el permiso de la app ($permiso). Devuelve ['id' => usuario a registrar].
+     */
+    private function jefe(string $permiso = 'alta_empleado'): ?array
     {
         $idOperador = (int)($this->request->getVar('id_operador') ?? 0);
         if ($idOperador <= 0) return null;
-        return \Config\Database::connect()->query(
+        $db = \Config\Database::connect();
+
+        $u = $db->query(
             'SELECT id FROM usuario WHERE id_empleado = ? AND estatus = 1 AND is_deleted = 0 LIMIT 1',
             [$idOperador]
-        )->getRowArray() ?: null;
+        )->getRowArray();
+        if ($u) return $u;
+
+        $emp = $db->query('SELECT id FROM empleados WHERE id = ? AND estatus = 1', [$idOperador])->getRowArray();
+        if (!$emp) return null;
+        if (!in_array($permiso, AppPermisosController::leer($idOperador), true)) return null;
+
+        // Sin usuario propio: las columnas created_by/updated_by se asignan al primer administrador activo
+        $adm = $db->query(
+            'SELECT u.id FROM usuario u INNER JOIN rol_sistema rs ON rs.id = u.id_rol_sistema
+             WHERE u.estatus = 1 AND u.is_deleted = 0 ORDER BY rs.nivel ASC, u.id ASC LIMIT 1'
+        )->getRowArray();
+        return ['id' => (int)($adm['id'] ?? 0)];
     }
 
     /** GET /empleados-kiosko/(:num)?id_operador=  -> datos personales y de contacto */
     public function detalle($id = null): mixed
     {
-        if (!$this->jefe()) {
-            return $this->respond(['status' => 'error', 'message' => 'Solo jefes de turno pueden editar empleados'], 403);
+        if (!$this->jefe('empleados')) {
+            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para editar empleados'], 403);
         }
         $e = (new EmpleadoModel())->find((int)$id);
         if (!$e) return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
@@ -56,9 +73,9 @@ class EmpleadosKioskoController extends EmpleadosController
     /** POST /empleados-kiosko/(:num)/actualizar  -> solo datos personales y de contacto (sin banco ni sueldo) */
     public function actualizarKiosko($id = null): mixed
     {
-        $jefe = $this->jefe();
+        $jefe = $this->jefe('empleados');
         if (!$jefe) {
-            return $this->respond(['status' => 'error', 'message' => 'Solo jefes de turno pueden editar empleados'], 403);
+            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para editar empleados'], 403);
         }
         $model = new EmpleadoModel();
         if (!$model->find((int)$id)) {
@@ -126,7 +143,7 @@ class EmpleadosKioskoController extends EmpleadosController
         $db   = \Config\Database::connect();
         $jefe = $this->jefe();
         if (!$jefe) {
-            return $this->respond(['status' => 'error', 'message' => 'Solo jefes de turno pueden dar de alta empleados'], 403);
+            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para dar de alta empleados'], 403);
         }
 
         $rfc   = strtoupper(trim((string)($this->request->getVar('rfc') ?? '')));

@@ -35,7 +35,7 @@ class EmpleadoModel extends Model
     /**
      * Lista paginada con filtros (equivalente a getEmpleados legacy).
      */
-    public function listar(int $limit, int $offset, array $zonas = [], array $puestos = [], ?string $fechas = null, ?string $status = null, ?int $ubicacion = null): array
+    public function listar(int $limit, int $offset, array $zonas = [], array $puestos = [], ?string $fechas = null, ?string $status = null, ?int $ubicacion = null, ?array $alcance = null): array
     {
         $builder = $this->db->table('empleados e')
             ->select('e.id, CONCAT(e.nombre," ",e.paterno," ",e.materno) AS nombre, e.curp, e.fecha_efectiva, mp.valor AS puesto, e.estatus, e.acceso_biometrico, s.servicio AS ubicacion_principal')
@@ -60,6 +60,10 @@ class EmpleadoModel extends Model
 
         if ($ubicacion !== null) {
             $builder->where('e.id_ubicacion_principal', $ubicacion); // ← nuevo
+        }
+
+        if ($cond = \App\Libraries\AlcanceLibrary::condicion($alcance, 's')) {
+            $builder->where($cond, null, false); // roles finos
         }
 
         $total = (clone $builder)->countAllResults(false);
@@ -98,7 +102,7 @@ class EmpleadoModel extends Model
     /**
      * Búsqueda full-text (equivalente a searchEmpleado legacy).
      */
-    public function buscar(string $search, int $limit, int $offset): array
+    public function buscar(string $search, int $limit, int $offset, ?array $alcance = null): array
     {
         $search  = preg_replace('/\s+/', ' ', trim($search));
         $like    = '%' . $search . '%';
@@ -115,6 +119,10 @@ class EmpleadoModel extends Model
                 ->orLike('e.nss', $search)
                 ->orWhere('e.id', $idExact)
             ->groupEnd();
+
+        if ($cond = \App\Libraries\AlcanceLibrary::condicion($alcance, 's')) {
+            $base->where($cond, null, false); // roles finos
+        }
 
         $total = (clone $base)->countAllResults(false);
 
@@ -424,19 +432,25 @@ class EmpleadoModel extends Model
             . '(SELECT descriptor FROM empleado_rostro_embeddings WHERE id_empleado = empleados.id AND is_active = 1 LIMIT 1) AS descriptor_servidor';
 
         if (ctype_digit($query)) {
-            return $this->select($selectConEnrolamiento)
+            $fila = $this->select($selectConEnrolamiento)
                         ->where('id', (int)ltrim($query, '0'))
                         ->where('estatus', 1)
                         ->first();
-        }
-
-        return $this->select($selectConEnrolamiento)
+        } else {
+            $fila = $this->select($selectConEnrolamiento)
                     ->groupStart()
                         ->where('curp', strtoupper($query))
                         ->orWhere('rfc', strtoupper($query))
                     ->groupEnd()
                     ->where('estatus', 1)
                     ->first();
+        }
+
+        // Vectores extra aprendidos (solo si ROSTRO_MULTI está activo)
+        if ($fila) {
+            $fila['descriptores_extra'] = \App\Controllers\Api\V1\RostroAutoController::extrasPara([$fila['id']])[(int)$fila['id']] ?? [];
+        }
+        return $fila;
     }
 
     /**
@@ -512,6 +526,69 @@ class EmpleadoModel extends Model
     }
 
     /**
+     * Cierra entradas que se quedaron sin salida: si ya pasaron $graciaMin minutos desde
+     * que terminó su turno, se agrega una salida a la hora de fin del turno con
+     * estado_salida = 'no_registrada'. Sirve para que no se descuadren los reportes y para
+     * que el empleado pueda registrar su entrada del siguiente turno.
+     *
+     * @param int|null $idEmpleado  solo ese empleado (null = todos)
+     * @return int  cuántas entradas se cerraron
+     */
+    public function cerrarEntradasAbiertas(?int $idEmpleado = null, ?\DateTime $ahora = null, int $graciaMin = 240): int
+    {
+        $tz    = new \DateTimeZone('America/Mexico_City');
+        $ahora = $ahora ?: new \DateTime('now', $tz);
+
+        $sql = "SELECT e.id, e.id_empleado, e.fecha, e.hora, e.ip, e.id_capturista, e.id_ubicacion,
+                       e.latitud, e.longitud, COALESCE(NULLIF(e.id_turno, 0), emp.id_turno) AS id_turno
+                FROM asistencias e
+                JOIN empleados emp ON emp.id = e.id_empleado
+                WHERE e.id_status = 1
+                  AND e.fecha >= DATE_SUB(CURDATE(), INTERVAL 10 DAY)
+                  AND NOT EXISTS (SELECT 1 FROM asistencias n WHERE n.id_empleado = e.id_empleado AND n.id > e.id)";
+        $par = [];
+        if ($idEmpleado) { $sql .= ' AND e.id_empleado = ?'; $par[] = $idEmpleado; }
+
+        $cerradas = 0;
+        foreach ($this->db->query($sql, $par)->getResultArray() as $r) {
+            $fin = \App\Libraries\TurnosLibrary::horaSalida((int)$r['id_turno'], new \DateTime($r['fecha'] . ' ' . $r['hora'], $tz));
+            if (!$fin) continue;
+            $limite = (clone $fin)->modify("+{$graciaMin} minutes");
+            if ($ahora->getTimestamp() < $limite->getTimestamp()) continue;
+
+            $data = [
+                'id_empleado'           => (int)$r['id_empleado'],
+                'fecha'                 => $fin->format('Y-m-d'),
+                'hora'                  => $fin->format('H:i:s'),
+                'latitud'               => $r['latitud'],
+                'longitud'              => $r['longitud'],
+                'ip'                    => $r['ip'],
+                'id_status'             => 2,
+                'id_capturista'         => $r['id_capturista'],
+                'id_ubicacion'          => $r['id_ubicacion'],
+                'id_turno'              => $r['id_turno'],
+                'id_asistencia_entrada' => (int)$r['id'],
+                'estado_salida'         => 'no_registrada',
+            ];
+            try {
+                $ok = $this->db->table('asistencias')->insert($data);
+            } catch (\Throwable $e) { $ok = false; }
+            if (!$ok) { // estado_salida aún es ENUM (falta migración): se cierra igual
+                unset($data['estado_salida']);
+                try { $ok = $this->db->table('asistencias')->insert($data); } catch (\Throwable $e) { $ok = false; }
+            }
+            if ($ok) {
+                $cerradas++;
+                if ($this->db->fieldExists('origen', 'asistencias')) {
+                    $this->db->query("UPDATE asistencias SET origen = 'sistema' WHERE id = ?", [$this->db->insertID()]);
+                }
+                $this->actualizarActividad((int)$r['id_empleado'], 2);
+            }
+        }
+        return $cerradas;
+    }
+
+    /**
      * Registra entrada o salida en la tabla asistencias.
      */
     public function registrarAsistencia(
@@ -545,10 +622,32 @@ class EmpleadoModel extends Model
                 $data['origen'] = $extra['origen'];
             }
 
-            $this->db->table('asistencias')->insert($data);
+            // Dispositivo que hizo el registro (antifraude) — solo si la columna ya existe
+            if (!empty($extra['device_id']) && $this->db->fieldExists('device_id', 'asistencias')) {
+                $data['device_id'] = $extra['device_id'];
+            }
+
+            // Minutos de salida anticipada — solo si la columna ya existe (migración)
+            if (isset($extra['minutos_anticipada']) && $this->db->fieldExists('minutos_anticipada', 'asistencias')) {
+                $data['minutos_anticipada'] = (int)$extra['minutos_anticipada'];
+            }
+
+            $ok = false; $errIns = '';
+            try {
+                $ok = $this->db->table('asistencias')->insert($data);
+            } catch (\Throwable $e) { $errIns = $e->getMessage(); }
+
+            // Si estado_salida aún es un ENUM sin 'anticipada' (falta la migración), no perder el registro
+            if (!$ok && isset($data['estado_salida'])) {
+                unset($data['estado_salida'], $data['minutos_anticipada']);
+                $this->db->table('asistencias')->insert($data);
+                log_message('error', 'estado_salida no se pudo guardar (correr migracion_salida_anticipada.sql): ' . $errIns);
+            } elseif (!$ok) {
+                throw new \RuntimeException($errIns ?: 'No se pudo insertar la asistencia');
+            }
 
             $this->db->query("
-                UPDATE empleados 
+                UPDATE empleados
                 SET id_ubicacion_principal = (
                     SELECT id_ubicacion
                     FROM asistencias

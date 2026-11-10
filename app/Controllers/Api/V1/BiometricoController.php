@@ -117,6 +117,23 @@ class BiometricoController extends ResourceController
         // Salida antes de hora que el propio empleado CONFIRMÓ en el kiosko (sin internet)
         $anticipadaConfirmada = filter_var($this->request->getVar('salida_anticipada_confirmada'), FILTER_VALIDATE_BOOLEAN);
 
+        // ── Dispositivo (antifraude / bloqueo remoto) ─────────────
+        $deviceId = trim((string)($this->request->getVar('device_id') ?? ''));
+        if (!preg_match('/^[A-Za-z0-9\-]{8,64}$/', $deviceId)) $deviceId = '';
+        if ($deviceId !== '') {
+            try {
+                $bloq = \Config\Database::connect()
+                    ->query('SELECT bloqueado FROM dispositivos WHERE device_id = ?', [$deviceId])->getRowArray();
+                if ($bloq && (int)$bloq['bloqueado'] === 1) {
+                    return $this->respond([
+                        'status'  => 'error',
+                        'code'    => 'dispositivo_bloqueado',
+                        'message' => 'Este dispositivo está bloqueado. Contacta al administrador.',
+                    ], 403);
+                }
+            } catch (\Throwable $e) { /* tabla aún no existe */ }
+        }
+
         // ── Origen del registro (kiosko | web) ────────────────────
         // Desde el navegador solo se acepta dentro del radio de un servicio dado de alta.
         $origen = strtolower(trim((string)($this->request->getVar('origen') ?? 'kiosko')));
@@ -181,6 +198,18 @@ class BiometricoController extends ResourceController
         $ultima     = $model->ultimaAsistencia($idEmpleado);
         $lastStatus = (int)(($ultima['data'] ?? [])['id_status'] ?? 0);
 
+        // Entrada olvidada sin salida (turno ya terminó): se cierra sola y puede registrar la nueva
+        if ($nuevoStatus === 1 && $lastStatus === 1) {
+            try {
+                if ($model->cerrarEntradasAbiertas($idEmpleado, $ahora) > 0) {
+                    $ultima     = $model->ultimaAsistencia($idEmpleado);
+                    $lastStatus = (int)(($ultima['data'] ?? [])['id_status'] ?? 0);
+                }
+            } catch (\Throwable $e) {
+                log_message('error', 'Cierre automático de entrada: ' . $e->getMessage());
+            }
+        }
+
         if ($nuevoStatus === 2 && $lastStatus !== 1) {
             return $this->respond([
                 'status'  => 'error',
@@ -235,9 +264,14 @@ class BiometricoController extends ResourceController
             }
         }
 
-        // ── Lógica de SALIDA — bloquear si es anticipada ──────────
-        $ultimaEntrada = null;
-        if ($nuevoStatus === 2 && $configTurno) {
+        // ── Lógica de SALIDA — nunca se bloquea; solo se marca si fue anticipada ──
+        // Puede checar salida a cualquier hora (antes o después de su horario). Si sale
+        // más de 15 min antes de que termine su turno queda como "anticipada" y el panel
+        // lo muestra. No requiere autorización previa.
+        $ultimaEntrada    = null;
+        $estadoSalida     = null;
+        $minutosAnticipada = 0;
+        if ($nuevoStatus === 2) {
             $ultimaEntrada = $db->query(
                 "SELECT id, fecha, hora FROM asistencias
                  WHERE id_empleado = ? AND id_status = 1
@@ -245,12 +279,11 @@ class BiometricoController extends ResourceController
                 [$idEmpleado]
             )->getRowArray();
 
-            if ($ultimaEntrada) {
+            if ($ultimaEntrada && $configTurno) {
                 $fechaEntrada = new \DateTime(
                     $ultimaEntrada['fecha'] . ' ' . $ultimaEntrada['hora'],
                     new \DateTimeZone('America/Mexico_City')
                 );
-
                 $fechaSalida = clone $fechaEntrada;
                 if ($configTurno['siguiente_dia']) {
                     $fechaSalida->modify('+1 day');
@@ -258,87 +291,12 @@ class BiometricoController extends ResourceController
                 [$hSal, $mSal] = explode(':', $configTurno['salida']);
                 $fechaSalida->setTime((int)$hSal, (int)$mSal, 0);
 
-                $ventanaMinima = clone $fechaSalida;
-                $ventanaMinima->modify('-15 minutes');
-
-                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp() && !$permitirSalidaAnticipada && !$anticipadaConfirmada) {
-                    $minutosRestantes = (int)(($ventanaMinima->getTimestamp() - $ahora->getTimestamp()) / 60);
-                    $horas            = floor($minutosRestantes / 60);
-                    $mins             = $minutosRestantes % 60;
-
-                    // Incidencia salida anticipada
-                    try {
-                        $db->table('incidencias')->insert([
-                            'id_empleado' => $idEmpleado,
-                            'tipo'        => 'salida_anticipada',
-                            'descripcion' => "Intento de salida {$minutosRestantes} min antes del horario",
-                            'fecha'       => $ahora->format('Y-m-d'),
-                            'hora'        => $ahora->format('H:i:s'),
-                            'estatus'     => 0,
-                            'activo'      => 1,
-                            'created_at'  => $ahora->format('Y-m-d H:i:s'),
-                        ]);
-                    } catch (\Exception $e) {
-                        log_message('error', 'Error incidencia salida anticipada: ' . $e->getMessage());
-                    }
-
-                    return $this->respond([
-                        'status'  => 'bloqueado',
-                        'message' => 'No puedes registrar tu salida todavía',
-                        'data'    => [
-                            'hora_salida_valida' => $ventanaMinima->format('H:i') . ' del ' . $fechaSalida->format('d/m/Y'),
-                            'tiempo_restante'    => "{$horas}h {$mins}min",
-                            'minutos_restantes'  => $minutosRestantes,
-                        ],
-                    ], 423);
-                }
-
-                // Salida antes de hora CONFIRMADA por el empleado: se registra y se levanta
-                // una incidencia pendiente para que el jefe de turno la revise.
-                if ($anticipadaConfirmada && !$permitirSalidaAnticipada
-                    && $ahora->getTimestamp() < $ventanaMinima->getTimestamp()) {
-                    $minAntes = (int)(($fechaSalida->getTimestamp() - $ahora->getTimestamp()) / 60);
-                    try {
-                        $db->table('incidencias')->insert([
-                            'id_empleado' => $idEmpleado,
-                            'tipo'        => 'salida_anticipada',
-                            'descripcion' => "Salida anticipada confirmada por el empleado ({$minAntes} min antes del horario). Registrada sin conexión.",
-                            'fecha'       => $ahora->format('Y-m-d'),
-                            'hora'        => $ahora->format('H:i:s'),
-                            'estatus'     => 0,
-                            'activo'      => 1,
-                            'created_at'  => $ahora->format('Y-m-d H:i:s'),
-                        ]);
-                    } catch (\Exception $e) {
-                        log_message('error', 'Error incidencia salida anticipada confirmada: ' . $e->getMessage());
-                    }
-                }
-
-                // Si se usó la autorización de salida anticipada para pasar la
-                // ventana, se registra como incidencia (para que quede huella
-                // de que fue una excepción) y se apaga la bandera -- es un
-                // permiso de un solo uso, no permanente.
-                if ($ahora->getTimestamp() < $ventanaMinima->getTimestamp() && $permitirSalidaAnticipada) {
-                    try {
-                        $db->table('incidencias')->insert([
-                            'id_empleado' => $idEmpleado,
-                            'tipo'        => 'salida_anticipada_autorizada',
-                            'descripcion' => 'Salida anticipada autorizada por el administrador',
-                            'fecha'       => $ahora->format('Y-m-d'),
-                            'hora'        => $ahora->format('H:i:s'),
-                            'estatus'     => 1,
-                            'activo'      => 1,
-                            'created_at'  => $ahora->format('Y-m-d H:i:s'),
-                        ]);
-                    } catch (\Exception $e) {
-                        log_message('error', 'Error incidencia salida anticipada autorizada: ' . $e->getMessage());
-                    }
-
-                    try {
-                        $model->update($idEmpleado, ['permitir_salida_anticipada' => 0]);
-                    } catch (\Exception $e) {
-                        log_message('error', 'Error al apagar permitir_salida_anticipada: ' . $e->getMessage());
-                    }
+                $faltan = (int)floor(($fechaSalida->getTimestamp() - $ahora->getTimestamp()) / 60);
+                if ($faltan > 15) {
+                    $estadoSalida      = 'anticipada';
+                    $minutosAnticipada = $faltan;
+                } else {
+                    $estadoSalida = 'normal';
                 }
             }
         }
@@ -360,11 +318,20 @@ class BiometricoController extends ResourceController
                 'fecha'                 => $ahora->format('Y-m-d'),
                 'hora'                  => $ahora->format('H:i:s'),
                 'origen'                => $origen,
+                'estado_salida'         => $estadoSalida,
+                'minutos_anticipada'    => $minutosAnticipada,
+                'device_id'             => $deviceId,
             ]
         );
 
         if ($asistencia['status'] !== 'ok') {
             return $this->respond($asistencia, 500);
+        }
+
+        // Evidencia fotográfica (solo si el servidor la tiene activa; si falla, no afecta el registro)
+        $evid = (string)($this->request->getVar('evidencia') ?? '');
+        if ($evid !== '') {
+            \App\Libraries\EvidenciaLibrary::guardar((int)($asistencia['id'] ?? 0), $evid);
         }
 
         $model->actualizarActividad($idEmpleado, $nuevoStatus);
@@ -386,8 +353,14 @@ class BiometricoController extends ResourceController
                 'turno'           => $configTurno['tipo'] ?? 'desconocido',
                 'estado_entrada'  => $estadoEntrada,
                 'minutos_retardo' => $minutosRetardo,
+                'estado_salida'      => $estadoSalida,
+                'minutos_anticipada' => $minutosAnticipada,
             ],
         ];
+
+        if ($nuevoStatus === 2 && $estadoSalida === 'anticipada') {
+            $response['mensaje'] = "Salida registrada (anticipada, {$minutosAnticipada} min antes de tu horario)";
+        }
 
         if ($nuevoStatus === 1 && $configTurno) {
             $horaSalida = clone $ahora;
@@ -422,7 +395,7 @@ class BiometricoController extends ResourceController
         $rows = $db->query("
             SELECT a.id, a.fecha, a.hora, a.id_status,
                    CASE WHEN a.id_status = 1 THEN 'Entrada' WHEN a.id_status = 2 THEN 'Salida' ELSE 'Otro' END AS tipo,
-                   a.estado_entrada, a.minutos_retardo,
+                   a.estado_entrada, a.minutos_retardo, a.estado_salida,
                    s.servicio AS ubicacion
             FROM asistencias a
             LEFT JOIN servicios s ON s.id = a.id_ubicacion
@@ -466,62 +439,7 @@ class BiometricoController extends ResourceController
             ], 409);
         }
 
-        if ($esSalida) {
-            $turno = $db->query(
-                'SELECT e.id_turno, e.permitir_salida_anticipada FROM empleados e WHERE e.id = ?', [$idEmpleado]
-            )->getRowArray();
-
-            $idTurno                  = (int)($turno['id_turno'] ?? 0);
-            $permitirSalidaAnticipada = (int)($turno['permitir_salida_anticipada'] ?? 0) === 1;
-            $configTurnos = [
-                1367 => ['salida' => '08:00', 'siguiente_dia' => true],
-                1382 => ['salida' => '20:00', 'siguiente_dia' => false],
-                1387 => ['salida' => '19:00', 'siguiente_dia' => false],
-                1398 => ['salida' => '08:00', 'siguiente_dia' => true],
-                1399 => ['salida' => '19:00', 'siguiente_dia' => false],
-                1400 => ['salida' => '07:00', 'siguiente_dia' => true],
-            ];
-
-            $config = $configTurnos[$idTurno] ?? null;
-            if ($config) {
-                $ultimaEntrada = $db->query(
-                    "SELECT fecha, hora FROM asistencias
-                     WHERE id_empleado = ? AND id_status = 1
-                     ORDER BY id DESC LIMIT 1",
-                    [$idEmpleado]
-                )->getRowArray();
-
-                if ($ultimaEntrada) {
-                    $ahora        = new \DateTime('now', new \DateTimeZone('America/Mexico_City'));
-                    $fechaEntrada = new \DateTime(
-                        $ultimaEntrada['fecha'] . ' ' . $ultimaEntrada['hora'],
-                        new \DateTimeZone('America/Mexico_City')
-                    );
-                    $fechaSalida = clone $fechaEntrada;
-                    if ($config['siguiente_dia']) $fechaSalida->modify('+1 day');
-                    [$h, $m] = explode(':', $config['salida']);
-                    $fechaSalida->setTime((int)$h, (int)$m, 0);
-
-                    $ventana = clone $fechaSalida;
-                    $ventana->modify('-15 minutes');
-
-                    if ($ahora->getTimestamp() < $ventana->getTimestamp() && !$permitirSalidaAnticipada) {
-                        $mins  = (int)(($ventana->getTimestamp() - $ahora->getTimestamp()) / 60);
-                        $horas = floor($mins / 60);
-                        $minsR = $mins % 60;
-                        return $this->respond([
-                            'status'  => 'bloqueado',
-                            'message' => 'No puedes registrar tu salida todavía',
-                            'data'    => [
-                                'hora_salida_valida' => $ventana->format('H:i') . ' del ' . $fechaSalida->format('d/m/Y'),
-                                'tiempo_restante'    => "{$horas}h {$minsR}min",
-                                'minutos_restantes'  => $mins,
-                            ],
-                        ], 423);
-                    }
-                }
-            }
-        }
+        // La salida ya no se bloquea por horario: si es anticipada solo se marca en el panel.
 
         return $this->respond(['status' => 'ok', 'message' => 'Puede registrar']);
     }
@@ -583,7 +501,8 @@ class BiometricoController extends ResourceController
         $zonaId     = (int)($this->request->getVar('zona_id')     ?? 0); // NUEVO
     
         return $this->respond(
-            $model->registrosBiometrico($search, $dateFrom, $dateTo, $page, $pageSize, $servicioId, $clienteId, $zonaId)
+            $model->registrosBiometrico($search, $dateFrom, $dateTo, $page, $pageSize, $servicioId, $clienteId, $zonaId,
+                \App\Libraries\AlcanceLibrary::de($this->request->jwtUser ?? null))
         );
     }
 
@@ -634,6 +553,11 @@ class BiometricoController extends ResourceController
             AND e.acceso_biometrico = 1
             ORDER BY e.paterno, e.nombre
         ", [$ubicacionId])->getResultArray();
+
+        // Vectores extra aprendidos (solo si ROSTRO_MULTI está activo)
+        $ex = RostroAutoController::extrasPara(array_column($empleados, 'id'));
+        foreach ($empleados as &$e) { $e['descriptores_extra'] = $ex[(int)$e['id']] ?? []; }
+        unset($e);
 
         return $this->respond([
             'status'     => 'ok',
@@ -693,6 +617,8 @@ class BiometricoController extends ResourceController
         if (!$empleado) {
             return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
         }
+
+        $empleado['descriptores_extra'] = RostroAutoController::extrasPara([$empleado['id']])[(int)$empleado['id']] ?? [];
 
         return $this->respond(['status' => 'ok', 'data' => $empleado]);
     }
@@ -850,6 +776,7 @@ class BiometricoController extends ResourceController
             ->where('id_empleado', $idEmpleado)
             ->where('is_active', 1)
             ->update(['is_active' => 0]);
+        RostroAutoController::borrarExtras((int)$idEmpleado);
 
         $db->table('empleado_rostro_embeddings')->insert([
             'id_empleado'            => $idEmpleado,
@@ -911,6 +838,7 @@ class BiometricoController extends ResourceController
     if ($servicioId > 0)  { $where[] = 's.id = ?';        $params[] = $servicioId; }
     if ($clienteId  > 0)  { $where[] = 's.id_cliente = ?'; $params[] = $clienteId; }
     if ($zonaId     > 0)  { $where[] = 's.id_zona = ?';    $params[] = $zonaId; } // NUEVO
+    if ($cond = \App\Libraries\AlcanceLibrary::condicion(\App\Libraries\AlcanceLibrary::de($this->request->jwtUser ?? null), 's')) { $where[] = $cond; }
 
     $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
 

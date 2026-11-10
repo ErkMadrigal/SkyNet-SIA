@@ -49,8 +49,8 @@ class IncidenciasKioskoController extends IncidenciasController
             'SELECT id FROM usuario WHERE id_empleado = ? AND estatus = 1 AND is_deleted = 0 LIMIT 1',
             [$idOperador]
         )->getRowArray();
-        if (!$jefe) {
-            return $this->respond(['status' => 'error', 'message' => 'Solo jefes de turno pueden subir incidencias'], 403);
+        if (!$jefe && !in_array('incidencias', AppPermisosController::leer($idOperador), true)) {
+            return $this->respond(['status' => 'error', 'message' => 'No tienes permiso para subir incidencias'], 403);
         }
 
         $idEmpleado  = (int)($this->request->getVar('id') ?? 0);

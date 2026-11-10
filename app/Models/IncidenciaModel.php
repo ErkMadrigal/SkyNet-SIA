@@ -104,7 +104,8 @@ class IncidenciaModel extends Model
         int $pageSize,
         int $servicioId = 0,
         int $clienteId  = 0,
-        int $zonaId     = 0
+        int $zonaId     = 0,
+        ?array $alcance = null          // roles finos: limita a ciertas zonas/clientes
     ): array {
         $pageSize = max(1, min(200, $pageSize));
         $offset   = ($page - 1) * $pageSize;
@@ -124,6 +125,8 @@ class IncidenciaModel extends Model
         $empleadoExpr    = $nombreLimpio('e');
         $capturistaExpr  = $nombreLimpio('ec');
     
+        $colMinAnt = $db->fieldExists('minutos_anticipada', 'asistencias') ? 'a.minutos_anticipada' : 'NULL';
+
         $baseQuery = $db->table('asistencias a')
             ->select("
                 {$empleadoExpr} AS empleado,
@@ -134,6 +137,8 @@ class IncidenciaModel extends Model
                 CONCAT('https://www.google.com/maps?q=', a.latitud, ',', a.longitud) AS maps_url,
                 a.ip,
                 {$capturistaExpr} AS capturista,
+                a.estado_salida,
+                {$colMinAnt} AS minutos_anticipada,
                 CASE WHEN a.id_status=1 THEN 'Entrada' WHEN a.id_status=2 THEN 'Salida' ELSE 'Desconocido' END AS estado
             ")
             ->join('empleados e',  'e.id = a.id_empleado',   'left')
@@ -163,6 +168,7 @@ class IncidenciaModel extends Model
         if ($servicioId > 0) $baseQuery->where('s.id', $servicioId);
         if ($clienteId  > 0) $baseQuery->where('s.id_cliente', $clienteId);
         if ($zonaId     > 0) $baseQuery->where('s.id_zona', $zonaId);
+        if ($cond = \App\Libraries\AlcanceLibrary::condicion($alcance, 's')) $baseQuery->where($cond, null, false);
     
         // Total — misma lógica, clonada antes de limit/offset
         $total = $db->table('asistencias a')
@@ -193,6 +199,7 @@ class IncidenciaModel extends Model
         if ($servicioId > 0) $total->where('s.id', $servicioId);
         if ($clienteId  > 0) $total->where('s.id_cliente', $clienteId);
         if ($zonaId     > 0) $total->where('s.id_zona', $zonaId);
+        if ($cond) $total->where($cond, null, false);
     
         $totalCount = (int)($total->countAllResults());
     

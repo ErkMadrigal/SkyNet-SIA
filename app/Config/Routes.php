@@ -167,7 +167,32 @@ $routes->group('api', function ($routes) {
             $routes->get('ubicacion-cercana', 'Api\V1\BiometricoController::ubicacionCercana');
             $routes->get('ubicaciones-buscar', 'Api\V1\BiometricoController::ubicacionesBuscar'); // NUEVO -- búsqueda por nombre para el kiosko
             $routes->post('enrolar', 'Api\V1\BiometricoController::enrolar'); // NUEVO -- enrolamiento facial (2 capturas)
+            $routes->get('paquete/(:segment)', 'Api\V1\PaquetesController::descargar/$1');   // importar paquete por código
+            $routes->post('dispositivo',       'Api\V1\DispositivosController::ping');       // el equipo se reporta
+            $routes->post('refrescar-rostro',  'Api\V1\RostroAutoController::refrescar');     // reenrolamiento automático
 
+        });
+
+        // Tareas programadas (cron de cPanel; protegidas con CRON_KEY del .env)
+        $routes->get('mantenimiento/cerrar-entradas', 'Api\V1\MantenimientoController::cerrarEntradas');
+        $routes->get('mantenimiento/purgar-evidencias', 'Api\V1\MantenimientoController::purgarEvidencias');
+        $routes->get('asistencias/(:num)/evidencia', 'Api\V1\EvidenciaController::ver/$1', ['filter' => 'jwt']);
+
+        /* ─────────────────────────────────────────────────
+           PAQUETES DE EMPLEADOS y DISPOSITIVOS (solo administradores)
+        ───────────────────────────────────────────────── */
+        $routes->group('paquetes', ['filter' => 'jwt:admin'], function ($routes) {
+            $routes->get('servicios',    'Api\V1\PaquetesController::servicios');
+            $routes->get('empleados',    'Api\V1\PaquetesController::empleados');
+            $routes->get('/',            'Api\V1\PaquetesController::index');
+            $routes->post('/',           'Api\V1\PaquetesController::crear');
+            $routes->delete('(:num)',    'Api\V1\PaquetesController::revocar/$1');
+        });
+        $routes->group('dispositivos', ['filter' => 'jwt:admin'], function ($routes) {
+            $routes->get('alertas',      'Api\V1\DispositivosController::alertas');
+            $routes->get('versiones',    'Api\V1\DispositivosController::versiones');
+            $routes->get('/',            'Api\V1\DispositivosController::index');
+            $routes->patch('(:num)',     'Api\V1\DispositivosController::actualizar/$1');
         });
 
         /* ─────────────────────────────────────────────────
@@ -190,6 +215,9 @@ $routes->group('api', function ($routes) {
             $routes->patch('(:num)/salida-anticipada', 'Api\V1\EmpleadosController::toggleSalidaAnticipada/$1'); // NUEVO
             $routes->get('(:num)/estado-asistencia',   'Api\V1\EmpleadosController::estadoAsistencia/$1');       // NUEVO
             $routes->get('(:num)/asistencias',         'Api\V1\EmpleadosController::historialAsistencias/$1');   // NUEVO
+            $routes->get('(:num)/ubicaciones',         'Api\V1\EmpleadosController::historialUbicaciones/$1');
+            $routes->get('(:num)/rostro-extras',       'Api\V1\RostroAutoController::extras/$1');
+            $routes->delete('(:num)/rostro-extras',    'Api\V1\RostroAutoController::borrar/$1');   // NUEVO -- mapa de dónde ha checado
             $routes->get('(:num)/permisos-app',        'Api\V1\AppPermisosController::ver/$1');
             $routes->post('(:num)/permisos-app',       'Api\V1\AppPermisosController::guardar/$1');
             $routes->get('(:num)/incidencias',         'Api\V1\EmpleadosController::incidencias/$1');            // NUEVO
@@ -408,6 +436,8 @@ $routes->group('api', function ($routes) {
             $routes->get('(:num)',                 'Api\V1\UsuariosSistemaController::show/$1');
             $routes->post('/',                     'Api\V1\UsuariosSistemaController::create');
             $routes->post('(:num)/roles',          'Api\V1\UsuariosSistemaController::asignarRoles/$1');
+            $routes->get('(:num)/alcance',         'Api\V1\AlcanceController::ver/$1');
+            $routes->post('(:num)/alcance',        'Api\V1\AlcanceController::guardar/$1');
             $routes->post('(:num)/reset-password', 'Api\V1\UsuariosSistemaController::resetPassword/$1');
             $routes->patch('(:num)/estatus',       'Api\V1\UsuariosSistemaController::toggleEstatus/$1');
         });

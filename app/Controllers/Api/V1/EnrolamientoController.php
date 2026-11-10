@@ -58,6 +58,7 @@ class EnrolamientoController extends ResourceController
 
         $db->transStart();
         $db->table('empleado_rostro_embeddings')->where('id_empleado', (int)$id)->where('is_active', 1)->update(['is_active' => 0]);
+        RostroAutoController::borrarExtras((int)$id);
         $db->table('empleados')->where('id', (int)$id)->update(['rostro_enrolado' => 0]);
         // Links de enrolamiento sin usar ya no aplican
         $db->table('enrolamiento_tokens')->where('id_empleado', (int)$id)->where('used_at', null)->update(['expires_at' => date('Y-m-d H:i:s')]);
@@ -183,6 +184,7 @@ class EnrolamientoController extends ResourceController
 
         $db->transStart();
         $db->table('empleado_rostro_embeddings')->where('id_empleado', $idEmpleado)->where('is_active', 1)->update(['is_active' => 0]);
+        RostroAutoController::borrarExtras((int)$idEmpleado);
         $db->table('empleado_rostro_embeddings')->insert([
             'id_empleado'            => $idEmpleado,
             'descriptor'             => json_encode(array_values($g)),
