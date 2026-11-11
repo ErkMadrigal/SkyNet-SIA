@@ -806,9 +806,11 @@ class AuthController extends ResourceController
      */
     public function updateMe(): mixed
     {
-        $actor  = $this->request->jwtUser;
-        $nombre = trim($this->request->getVar('nombre') ?? '');
-        $correo = trim($this->request->getVar('correo') ?? '');
+        $actor   = $this->request->jwtUser;
+        $nombre  = trim((string) ($this->request->getVar('nombre') ?? ''));
+        $paterno = $this->request->getVar('paterno');
+        $materno = $this->request->getVar('materno');
+        $correo  = trim((string) ($this->request->getVar('correo') ?? ''));
 
         if (!$nombre || !$correo) {
             return $this->respond(['status' => 'error', 'message' => 'Nombre y correo son requeridos'], 422);
@@ -828,14 +830,78 @@ class AuthController extends ResourceController
             return $this->respond(['status' => 'error', 'message' => 'El correo ya está en uso'], 409);
         }
 
-        $model->update((int)$actor->id, [
-            'nombre' => $nombre,
-            'correo' => $correo,
-        ]);
+        $datos = ['nombre' => mb_substr($nombre, 0, 255), 'correo' => $correo];
+        if ($paterno !== null) $datos['paterno'] = mb_substr(trim((string) $paterno), 0, 255);
+        if ($materno !== null) $datos['materno'] = mb_substr(trim((string) $materno), 0, 255);
+
+        try {
+            $model->update((int)$actor->id, $datos);
+        } catch (\Throwable $e) {
+            log_message('error', 'updateMe: ' . $e->getMessage());
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo guardar el perfil'], 500);
+        }
 
         AuditLibrary::log((int)$actor->id, 'UPDATE_PERFIL', 'usuario', (string)$actor->id, 'Actualizó su perfil');
 
-        return $this->respond(['status' => 'ok', 'message' => 'Perfil actualizado correctamente']);
+        $u = $model->find((int)$actor->id) ?: [];
+        return $this->respond([
+            'status'  => 'ok',
+            'message' => 'Perfil actualizado correctamente',
+            'data'    => [
+                'nombre'          => $u['nombre']  ?? $nombre,
+                'paterno'         => $u['paterno'] ?? '',
+                'materno'         => $u['materno'] ?? '',
+                'nombre_completo' => trim(($u['nombre'] ?? $nombre) . ' ' . ($u['paterno'] ?? '') . ' ' . ($u['materno'] ?? '')),
+                'correo'          => $u['correo']  ?? $correo,
+            ],
+        ]);
+    }
+
+    /**
+     * GET /api/v1/auth/me/empleado
+     * Perfil del trabajador ligado al usuario (número de empleado, puesto, servicio, turno...).
+     * data = null si el usuario no está ligado a un empleado.
+     */
+    public function miEmpleado(): mixed
+    {
+        $actor = $this->request->jwtUser;
+        $db    = \Config\Database::connect();
+
+        $u = $db->query('SELECT nombre, paterno, materno, id_empleado FROM usuario WHERE id = ?', [(int)$actor->id])->getRowArray();
+        if (!$u) return $this->respond(['status' => 'ok', 'data' => null]);
+
+        $partes = ['nombre' => $u['nombre'], 'paterno' => $u['paterno'], 'materno' => $u['materno']];
+        $idEmp  = (int) ($u['id_empleado'] ?? 0);
+        if ($idEmp <= 0) {
+            return $this->respond(['status' => 'ok', 'data' => null, 'usuario' => $partes]);
+        }
+
+        $e = $db->query("
+            SELECT e.id, e.nombre, e.paterno, e.materno, e.curp, e.rfc, e.fotos, e.fecha_ingreso, e.estatus,
+                   e.rostro_enrolado, mp.valor AS puesto, mt.valor AS turno, s.servicio AS ubicacion
+            FROM empleados e
+            LEFT JOIN multicatalogo mp ON mp.id = e.id_puesto
+            LEFT JOIN multicatalogo mt ON mt.id = e.id_turno
+            LEFT JOIN servicios s ON s.id = e.id_ubicacion_principal
+            WHERE e.id = ?
+        ", [$idEmp])->getRowArray();
+
+        if (!$e) return $this->respond(['status' => 'ok', 'data' => null, 'usuario' => $partes]);
+
+        return $this->respond(['status' => 'ok', 'usuario' => $partes, 'data' => [
+            'id'              => (int) $e['id'],
+            'numero'          => str_pad((string) $e['id'], 6, '0', STR_PAD_LEFT),
+            'nombre_completo' => trim("{$e['nombre']} {$e['paterno']} {$e['materno']}"),
+            'curp'            => $e['curp'],
+            'rfc'             => $e['rfc'],
+            'puesto'          => $e['puesto'],
+            'turno'           => $e['turno'],
+            'ubicacion'       => $e['ubicacion'],
+            'fecha_ingreso'   => $e['fecha_ingreso'],
+            'foto'            => $e['fotos'],
+            'rostro_enrolado' => (int) $e['rostro_enrolado'] === 1,
+            'activo'          => (int) $e['estatus'] === 1,
+        ]]);
     }
 
     /**

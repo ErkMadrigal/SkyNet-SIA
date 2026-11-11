@@ -526,16 +526,19 @@ class EmpleadoModel extends Model
     }
 
     /**
-     * Cierra entradas que se quedaron sin salida: si ya pasaron $graciaMin minutos desde
-     * que terminó su turno, se agrega una salida a la hora de fin del turno con
-     * estado_salida = 'no_registrada'. Sirve para que no se descuadren los reportes y para
+     * Cierra entradas que se quedaron sin salida. La duración del turno se cuenta desde la
+     * entrada real (12 X 12: entró 6 pm -> termina 6 am); si ya pasaron $graciaMin minutos
+     * (4 h por defecto, CIERRE_GRACIA_MIN) después de ese fin, se agrega una salida a la hora
+     * de fin del turno con estado_salida = 'no_registrada'. Sirve para que no se descuadren los reportes y para
      * que el empleado pueda registrar su entrada del siguiente turno.
      *
      * @param int|null $idEmpleado  solo ese empleado (null = todos)
      * @return int  cuántas entradas se cerraron
      */
-    public function cerrarEntradasAbiertas(?int $idEmpleado = null, ?\DateTime $ahora = null, int $graciaMin = 240): int
+    public function cerrarEntradasAbiertas(?int $idEmpleado = null, ?\DateTime $ahora = null, ?int $graciaMin = null): int
     {
+        // Tolerancia después de cumplir la duración del turno (12 X 12 -> a las 16 h sin salida se cierra)
+        $graciaMin = $graciaMin ?? max(0, (int) env('CIERRE_GRACIA_MIN', 240));
         $tz    = new \DateTimeZone('America/Mexico_City');
         $ahora = $ahora ?: new \DateTime('now', $tz);
 
@@ -553,7 +556,7 @@ class EmpleadoModel extends Model
         foreach ($this->db->query($sql, $par)->getResultArray() as $r) {
             $fin = \App\Libraries\TurnosLibrary::horaSalida((int)$r['id_turno'], new \DateTime($r['fecha'] . ' ' . $r['hora'], $tz));
             if (!$fin) continue;
-            $limite = (clone $fin)->modify("+{$graciaMin} minutes");
+            $limite = \App\Libraries\TurnosLibrary::horaLimite((int)$r['id_turno'], new \DateTime($r['fecha'] . ' ' . $r['hora'], $tz), $graciaMin) ?? $fin;
             if ($ahora->getTimestamp() < $limite->getTimestamp()) continue;
 
             $data = [
@@ -668,5 +671,61 @@ class EmpleadoModel extends Model
         } catch (\Exception $e) {
             return ['status' => 'error', 'mensaje' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Corrige los cierres automáticos hechos con la lógica anterior (hora fija del reloj): la salida
+     * pasa a ser entrada real + duración del turno, como si hubiera cumplido su horario completo.
+     * Si ese fin (+ tolerancia) todavía no llega, la entrada se reabre (borra el cierre) para que siga en turno.
+     *
+     * @return array{revisados:int,corregidos:int,reabiertos:int,sin_cambio:int,sin_turno:int,muestra:array}
+     */
+    public function corregirCierresAutomaticos(bool $simular = true, ?string $marca = null): array
+    {
+        $tz     = new \DateTimeZone('America/Mexico_City');
+        $ahora  = new \DateTime('now', $tz);
+        $grac   = max(0, (int) env('CIERRE_GRACIA_MIN', 240));
+        $res    = ['revisados' => 0, 'corregidos' => 0, 'reabiertos' => 0, 'sin_cambio' => 0, 'sin_turno' => 0, 'muestra' => []];
+
+        $filas = $this->db->query("
+            SELECT s.id AS id_cierre, s.fecha AS cf, s.hora AS ch,
+                   e.fecha AS ef, e.hora AS eh,
+                   COALESCE(NULLIF(e.id_turno, 0), emp.id_turno) AS id_turno, s.id_empleado
+            FROM asistencias s
+            JOIN asistencias e ON e.id = s.id_asistencia_entrada
+            JOIN empleados emp ON emp.id = s.id_empleado
+            WHERE s.id_status = 2 AND s.estado_salida = 'no_registrada'
+        ")->getResultArray();
+
+        foreach ($filas as $f) {
+            $res['revisados']++;
+            $entrada = new \DateTime($f['ef'] . ' ' . $f['eh'], $tz);
+            $fin     = \App\Libraries\TurnosLibrary::horaSalida((int)$f['id_turno'], $entrada);
+            if (!$fin) { $res['sin_turno']++; continue; }
+
+            $limite = \App\Libraries\TurnosLibrary::horaLimite((int)$f['id_turno'], $entrada, $grac) ?? $fin;
+            $antes  = $f['cf'] . ' ' . $f['ch'];
+            $despues = $fin->format('Y-m-d H:i:s');
+
+            if ($ahora < $limite) {                       // todavía no vence: sigue en turno -> se reabre
+                $res['reabiertos']++;
+                $accion = 'reabrir';
+                if (!$simular) $this->db->query('DELETE FROM asistencias WHERE id = ?', [(int)$f['id_cierre']]);
+            } elseif ($antes === $despues && !$marca) {
+                $res['sin_cambio']++; continue;
+            } else {
+                $res['corregidos']++;
+                $accion = 'corregir';
+                if (!$simular) {
+                    $set = ['fecha' => $fin->format('Y-m-d'), 'hora' => $fin->format('H:i:s')];
+                    if ($marca === 'normal') $set['estado_salida'] = 'normal';
+                    $this->db->table('asistencias')->where('id', (int)$f['id_cierre'])->update($set);
+                }
+            }
+            if (count($res['muestra']) < 15) {
+                $res['muestra'][] = ['empleado' => (int)$f['id_empleado'], 'entrada' => $entrada->format('Y-m-d H:i'), 'salida_antes' => $antes, 'salida_despues' => $accion === 'reabrir' ? '(sigue en turno)' : $despues, 'accion' => $accion];
+            }
+        }
+        return $res;
     }
 }

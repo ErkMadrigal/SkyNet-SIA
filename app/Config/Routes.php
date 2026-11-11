@@ -109,6 +109,7 @@ $routes->group('api', function ($routes) {
             $routes->post('logout',           'Api\V1\AuthController::logout');
             $routes->post('logout-all',       'Api\V1\AuthController::logoutAll');
             $routes->put('me',                'Api\V1\AuthController::updateMe');
+            $routes->get('me/empleado',       'Api\V1\AuthController::miEmpleado');
             $routes->post('cambiar-password', 'Api\V1\AuthController::cambiarPassword');
         });
 
@@ -176,6 +177,7 @@ $routes->group('api', function ($routes) {
         // Tareas programadas (cron de cPanel; protegidas con CRON_KEY del .env)
         $routes->get('mantenimiento/cerrar-entradas', 'Api\V1\MantenimientoController::cerrarEntradas');
         $routes->get('mantenimiento/purgar-evidencias', 'Api\V1\MantenimientoController::purgarEvidencias');
+        $routes->get('mantenimiento/corregir-cierres', 'Api\V1\MantenimientoController::corregirCierres');
         $routes->get('asistencias/(:num)/evidencia', 'Api\V1\EvidenciaController::ver/$1', ['filter' => 'jwt']);
 
         /* ─────────────────────────────────────────────────
@@ -188,6 +190,7 @@ $routes->group('api', function ($routes) {
             $routes->post('/',           'Api\V1\PaquetesController::crear');
             $routes->delete('(:num)',    'Api\V1\PaquetesController::revocar/$1');
         });
+        $routes->get('sistema/estado', 'Api\V1\SistemaController::estado', ['filter' => 'jwt:admin']);
         $routes->group('dispositivos', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->get('alertas',      'Api\V1\DispositivosController::alertas');
             $routes->get('versiones',    'Api\V1\DispositivosController::versiones');
