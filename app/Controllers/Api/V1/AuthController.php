@@ -124,6 +124,14 @@ class AuthController extends ResourceController
     {
         $refreshToken = JwtLibrary::extraerBearer();
 
+        // El panel manda el refresh_token en el body (JSON o form); el header Bearer sigue funcionando
+        if (! $refreshToken) {
+            try { $json = $this->request->getJSON(true); } catch (\Throwable $e) { $json = null; }
+            $refreshToken = (is_array($json) ? ($json['refresh_token'] ?? null) : null)
+                ?: $this->request->getPost('refresh_token');
+            $refreshToken = $refreshToken ? trim((string) $refreshToken) : null;
+        }
+
         if (! $refreshToken) {
             return $this->respond([
                 'status'  => 'error',
