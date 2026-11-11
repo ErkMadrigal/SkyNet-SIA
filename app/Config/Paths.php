@@ -57,13 +57,13 @@ class Paths
 
 
 
-    public string $systemDirectory = __DIR__ . '/../../vendor/codeigniter4/framework/system';
-    public string $appDirectory = __DIR__ . '/..';
-    public string $writableDirectory = __DIR__ . '/../../writable';
+    // public string $systemDirectory = __DIR__ . '/../../vendor/codeigniter4/framework/system';
+    // public string $appDirectory = __DIR__ . '/..';
+    // public string $writableDirectory = __DIR__ . '/../../writable';
 
-    // public string $systemDirectory   = '/home1/santi299/repositories/SkyNet-SIA/vendor/codeigniter4/framework/system';
-    // public string $writableDirectory = '/home1/santi299/repositories/SkyNet-SIA/writable';
-    // public string $appDirectory      = '/home1/santi299/repositories/SkyNet-SIA/app';
+    public string $systemDirectory   = '/home1/santi299/repositories/SkyNet-SIA/vendor/codeigniter4/framework/system';
+    public string $writableDirectory = '/home1/santi299/repositories/SkyNet-SIA/writable';
+    public string $appDirectory      = '/home1/santi299/repositories/SkyNet-SIA/app';
 
 
     /**
