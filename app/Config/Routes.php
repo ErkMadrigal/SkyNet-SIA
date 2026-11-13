@@ -191,6 +191,15 @@ $routes->group('api', function ($routes) {
             $routes->delete('(:num)',    'Api\V1\PaquetesController::revocar/$1');
         });
         $routes->get('sistema/estado', 'Api\V1\SistemaController::estado', ['filter' => 'jwt:admin']);
+        $routes->group('lector-biometrico', ['filter' => 'jwt:admin'], function ($routes) {
+            $routes->post('importar',       'Api\V1\LectorBiometricoController::importar');
+            $routes->get('resumen',         'Api\V1\LectorBiometricoController::resumen');
+            $routes->get('movimientos',     'Api\V1\LectorBiometricoController::movimientos');
+            $routes->get('personas',        'Api\V1\LectorBiometricoController::personas');
+            $routes->get('empleados',       'Api\V1\LectorBiometricoController::empleados');
+            $routes->post('asignar',        'Api\V1\LectorBiometricoController::asignar');
+            $routes->post('asignar-masivo', 'Api\V1\LectorBiometricoController::asignarMasivo');
+        });
         $routes->group('dispositivos', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->get('alertas',      'Api\V1\DispositivosController::alertas');
             $routes->get('versiones',    'Api\V1\DispositivosController::versiones');
