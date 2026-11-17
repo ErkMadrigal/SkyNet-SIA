@@ -13,13 +13,15 @@ use App\Libraries\AuditLibrary;
  * Formato de cada línea del CSV (sin encabezado):
  *   id_biometrico, nombre, yyyy.mm.dd, hh:mm:ss, tipo, método, resultado, extra
  *
- *   POST lector-biometrico/importar        archivo CSV (multipart "archivo")
+ *   POST lector-biometrico/importar        archivo CSV (multipart "archivo"): solo registra a quien tiene su número asignado
+ *   GET  lector-biometrico/registros       ?desde=&hasta=&q=&modo=resumen|detalle  (primera/última del día o todos los movimientos)
  *   GET  lector-biometrico/resumen         totales + fechas con datos + últimos lotes
  *   GET  lector-biometrico/movimientos     ?fecha=YYYY-MM-DD&q=&sin_asignar=1
  *   GET  lector-biometrico/personas        ?q=&sin_asignar=1  (números distintos del lector)
  *   POST lector-biometrico/asignar         { id_biometrico, id_empleado|null }
  *   POST lector-biometrico/asignar-masivo  { filas: [{ id_empleado, id_biometrico }] }
  *   GET  lector-biometrico/empleados       ?q=  (buscador de empleados para asignar)
+ *   GET  lector-biometrico/empleado/(id)   número de biométrico de un empleado
  */
 class LectorBiometricoController extends ResourceController
 {
@@ -78,34 +80,64 @@ class LectorBiometricoController extends ResourceController
         if (!$validas) return $this->err('No se encontró ninguna fila válida. Revisa que sea el CSV del lector (número, nombre, fecha, hora...)', 422);
 
         try {
+            // Solo se registra a quien ya tiene su número de biométrico asignado a un empleado en el SIAG
+            $mapa = [];
+            foreach ($db->query('SELECT id, id_biometrico FROM empleados WHERE id_biometrico IS NOT NULL')->getResultArray() as $e) {
+                $mapa[(string)$e['id_biometrico']] = (int)$e['id'];
+            }
+
+            $aInsertar = []; $sinAsignar = []; $noReconocidas = 0; $empleadosDelArchivo = [];
+            foreach ($validas as $r) {
+                if ($r['id_biometrico'] === '-1') { $noReconocidas++; continue; }
+                if (!isset($mapa[$r['id_biometrico']])) {
+                    $k = $r['id_biometrico'];
+                    if (!isset($sinAsignar[$k])) $sinAsignar[$k] = ['id_biometrico' => $k, 'nombre' => $r['nombre'], 'marcaciones' => 0];
+                    $sinAsignar[$k]['marcaciones']++;
+                    continue;
+                }
+                $r['id_empleado'] = $mapa[$r['id_biometrico']];
+                $empleadosDelArchivo[$r['id_empleado']] = true;
+                $aInsertar[] = $r;
+            }
+
             $db->query('INSERT INTO biometrico_lotes (archivo, filas, desde, hasta, created_by, created_at) VALUES (?,?,?,?,?,NOW())',
                 [mb_substr($archivo->getClientName(), 0, 255), count($validas), $desde, $hasta, (int)($u->id ?? 0)]);
             $idLote = (int)$db->insertID();
 
             $nuevas = 0;
-            foreach (array_chunk($validas, 500) as $lote) {
+            foreach (array_chunk($aInsertar, 500) as $lote) {
                 $ph = []; $par = [];
                 foreach ($lote as $r) {
-                    $ph[] = '(?,?,?,?,?,?,?,?,NOW())';
-                    array_push($par, $r['id_biometrico'], $r['nombre'], $r['fecha'], $r['hora'], $r['tipo'], $r['metodo'], $r['resultado'], $idLote);
+                    $ph[] = '(?,?,?,?,?,?,?,?,?,NOW())';
+                    array_push($par, $r['id_biometrico'], $r['id_empleado'], $r['nombre'], $r['fecha'], $r['hora'], $r['tipo'], $r['metodo'], $r['resultado'], $idLote);
                 }
-                $db->query('INSERT IGNORE INTO biometrico_logs (id_biometrico, nombre, fecha, hora, tipo, metodo, resultado, id_lote, created_at) VALUES ' . implode(',', $ph), $par);
+                $db->query('INSERT IGNORE INTO biometrico_logs (id_biometrico, id_empleado, nombre, fecha, hora, tipo, metodo, resultado, id_lote, created_at) VALUES ' . implode(',', $ph), $par);
                 $nuevas += $db->affectedRows();
             }
-            $dup = count($validas) - $nuevas;
-            $db->query('UPDATE biometrico_lotes SET nuevas = ?, duplicadas = ?, invalidas = ? WHERE id = ?', [$nuevas, $dup, $invalidas, $idLote]);
+            $repetidas = count($aInsertar) - $nuevas;
+            $db->query('UPDATE biometrico_lotes SET nuevas = ?, duplicadas = ?, invalidas = ? WHERE id = ?', [$nuevas, $repetidas, $invalidas, $idLote]);
         } catch (\Throwable $e) {
             log_message('error', 'Importar lector: ' . $e->getMessage());
-            return $this->err('Falta correr migracion_lector_biometrico.sql o hubo un error al guardar', 500);
+            return $this->err('Falta correr migracion_lector_biometrico.sql y migracion_lector_biometrico_2.sql, o hubo un error al guardar', 500);
         }
 
-        $personas = (int)($db->query("SELECT COUNT(DISTINCT id_biometrico) AS n FROM biometrico_logs WHERE id_lote = ? AND id_biometrico <> '-1'", [$idLote])->getRowArray()['n'] ?? 0);
-        $sinAsignar = (int)($db->query("SELECT COUNT(DISTINCT l.id_biometrico) AS n FROM biometrico_logs l LEFT JOIN empleados e ON e.id_biometrico = l.id_biometrico WHERE l.id_lote = ? AND l.id_biometrico <> '-1' AND e.id IS NULL", [$idLote])->getRowArray()['n'] ?? 0);
+        usort($sinAsignar, fn($a, $b) => $b['marcaciones'] <=> $a['marcaciones']);
+        $omitidasFilas = array_sum(array_column($sinAsignar, 'marcaciones'));
 
         AuditLibrary::log((int)($u->id ?? 0), 'LECTOR_IMPORTAR', 'biometrico_lotes', (string)$idLote, "Importó {$nuevas} marcaciones de {$archivo->getClientName()}");
         return $this->respond(['status' => 'ok', 'data' => [
-            'id_lote' => $idLote, 'filas' => count($validas), 'nuevas' => $nuevas, 'duplicadas' => $dup, 'invalidas' => $invalidas,
-            'desde' => $desde, 'hasta' => $hasta, 'personas' => $personas, 'sin_asignar' => $sinAsignar,
+            'id_lote'          => $idLote,
+            'filas'            => count($validas),
+            'registradas'      => $nuevas,
+            'repetidas'        => $repetidas,
+            'invalidas'        => $invalidas,
+            'empleados'        => count($empleadosDelArchivo),
+            'desde'            => $desde,
+            'hasta'            => $hasta,
+            'sin_asignar'      => count($sinAsignar),          // números del archivo sin empleado en el SIAG
+            'sin_asignar_filas'=> $omitidasFilas,
+            'sin_asignar_lista'=> array_slice($sinAsignar, 0, 300),
+            'no_reconocidas'   => $noReconocidas,
         ]]);
     }
 
@@ -116,16 +148,67 @@ class LectorBiometricoController extends ResourceController
         if (!$this->admin()) return $this->err('Sin permiso', 403);
         $db = \Config\Database::connect();
         try {
-            $tot = $db->query("SELECT COUNT(*) AS marcaciones, COUNT(DISTINCT CASE WHEN id_biometrico <> '-1' THEN id_biometrico END) AS personas, MIN(fecha) AS desde, MAX(fecha) AS hasta,
-                                      SUM(resultado <> 'Correcto') AS no_reconocidas FROM biometrico_logs")->getRowArray();
-            $asig = $db->query("SELECT COUNT(DISTINCT l.id_biometrico) AS n FROM biometrico_logs l JOIN empleados e ON e.id_biometrico = l.id_biometrico WHERE l.id_biometrico <> '-1'")->getRowArray();
-            $fechas = $db->query('SELECT fecha, COUNT(*) AS n FROM biometrico_logs GROUP BY fecha ORDER BY fecha DESC LIMIT 120')->getResultArray();
+            $tot = $db->query("SELECT COUNT(*) AS marcaciones, COUNT(DISTINCT id_empleado) AS empleados, MIN(fecha) AS desde, MAX(fecha) AS hasta FROM biometrico_logs")->getRowArray();
             $lotes = $db->query('SELECT id, archivo, filas, nuevas, duplicadas, invalidas, desde, hasta, created_at FROM biometrico_lotes ORDER BY id DESC LIMIT 10')->getResultArray();
+            $asig = $db->query('SELECT COUNT(*) AS n FROM empleados WHERE id_biometrico IS NOT NULL')->getRowArray();
         } catch (\Throwable $e) {
-            return $this->err('Falta correr migracion_lector_biometrico.sql', 500);
+            return $this->err('Falta correr migracion_lector_biometrico.sql y migracion_lector_biometrico_2.sql', 500);
         }
-        $tot['asignadas'] = (int)($asig['n'] ?? 0);
-        return $this->respond(['status' => 'ok', 'data' => ['totales' => $tot, 'fechas' => $fechas, 'lotes' => $lotes]]);
+        $tot['con_id_asignado'] = (int)($asig['n'] ?? 0);
+        return $this->respond(['status' => 'ok', 'data' => ['totales' => $tot, 'lotes' => $lotes]]);
+    }
+
+    /**
+     * Registros del lector ya guardados (solo empleados con ID asignado).
+     *   modo=resumen  -> por empleado y día: primera entrada, última marcación y total
+     *   modo=detalle  -> todos los movimientos
+     */
+    public function registros()
+    {
+        if (!$this->admin()) return $this->err('Sin permiso', 403);
+        $desde = (string)($this->request->getGet('desde') ?? '');
+        $hasta = (string)($this->request->getGet('hasta') ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $desde) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $hasta)) return $this->err('Elige el rango de fechas', 422);
+        $q    = trim((string)($this->request->getGet('q') ?? ''));
+        $modo = $this->request->getGet('modo') === 'detalle' ? 'detalle' : 'resumen';
+        $max  = 20000;
+
+        $where = 'l.fecha BETWEEN ? AND ?'; $par = [$desde, $hasta];
+        if ($q !== '') {
+            $like = '%' . $q . '%';
+            $where .= " AND (CONCAT_WS(' ', e.nombre, e.paterno, e.materno) LIKE ? OR LPAD(e.id, 6, '0') LIKE ? OR l.id_biometrico = ?)";
+            array_push($par, $like, $like, $q);
+        }
+
+        $db = \Config\Database::connect();
+        try {
+            if ($modo === 'resumen') {
+                $sql = "SELECT l.id_empleado, LPAD(e.id, 6, '0') AS numero, CONCAT_WS(' ', TRIM(e.nombre), TRIM(e.paterno), TRIM(e.materno)) AS empleado,
+                               s.servicio AS ubicacion, MAX(l.id_biometrico) AS id_biometrico, l.fecha,
+                               MIN(l.hora) AS primera, MAX(l.hora) AS ultima, COUNT(*) AS marcaciones
+                        FROM biometrico_logs l
+                        JOIN empleados e ON e.id = l.id_empleado
+                        LEFT JOIN servicios s ON s.id = e.id_ubicacion_principal
+                        WHERE {$where}
+                        GROUP BY l.id_empleado, e.id, e.nombre, e.paterno, e.materno, s.servicio, l.fecha
+                        ORDER BY l.fecha, e.paterno, e.nombre LIMIT " . ($max + 1);
+            } else {
+                $sql = "SELECT l.id_empleado, LPAD(e.id, 6, '0') AS numero, CONCAT_WS(' ', TRIM(e.nombre), TRIM(e.paterno), TRIM(e.materno)) AS empleado,
+                               s.servicio AS ubicacion, l.id_biometrico, l.fecha, l.hora, l.metodo
+                        FROM biometrico_logs l
+                        JOIN empleados e ON e.id = l.id_empleado
+                        LEFT JOIN servicios s ON s.id = e.id_ubicacion_principal
+                        WHERE {$where}
+                        ORDER BY l.fecha, e.paterno, e.nombre, l.hora LIMIT " . ($max + 1);
+            }
+            $rows = $db->query($sql, $par)->getResultArray();
+        } catch (\Throwable $e) {
+            log_message('error', 'Registros lector: ' . $e->getMessage());
+            return $this->err('Falta correr migracion_lector_biometrico_2.sql', 500);
+        }
+        $trunc = count($rows) > $max;
+        if ($trunc) array_pop($rows);
+        return $this->respond(['status' => 'ok', 'modo' => $modo, 'truncado' => $trunc, 'data' => $rows]);
     }
 
     /** Movimientos de un día, agrupados por persona. */
@@ -315,5 +398,17 @@ class LectorBiometricoController extends ResourceController
             $rows = [];
         }
         return $this->respond(['status' => 'ok', 'data' => $rows]);
+    }
+
+    /** Número de biométrico asignado a un empleado (para su ficha). */
+    public function deEmpleado($id = null)
+    {
+        if (!$this->admin()) return $this->err('Sin permiso', 403);
+        try {
+            $r = \Config\Database::connect()->query('SELECT id_biometrico FROM empleados WHERE id = ?', [(int)$id])->getRowArray();
+        } catch (\Throwable $e) {
+            return $this->respond(['status' => 'ok', 'data' => ['id_biometrico' => null, 'disponible' => false]]);   // aún sin migración
+        }
+        return $this->respond(['status' => 'ok', 'data' => ['id_biometrico' => $r['id_biometrico'] ?? null, 'disponible' => true]]);
     }
 }

@@ -437,10 +437,18 @@ class ImportacionMasivaController extends ResourceController
                     continue;
                 }
 
-                $reader->setLoadSheetsOnly([$hojaAltas]);
+                // También se carga la hoja "Asistencia" (si existe) para tomar el sueldo
+                // cuando la columna SUELDO de "Altas" viene vacía.
+                $hojasCargar = [$hojaAltas];
+                $hojaAsist   = null;
+                foreach ($nombresHojas as $h) {
+                    if (strcasecmp(trim($h), 'Asistencia') === 0) { $hojaAsist = $h; $hojasCargar[] = $h; break; }
+                }
+                $reader->setLoadSheetsOnly($hojasCargar);
                 $reader->setReadDataOnly(true);
                 $spreadsheet = $reader->load($tmpPath);
                 $sheet       = $spreadsheet->getSheetByName($hojaAltas);
+                $sueldosAsist = $hojaAsist ? $this->sueldosDeAsistencia($spreadsheet->getSheetByName($hojaAsist)) : [];
             } catch (\Throwable $e) {
                 @unlink($tmpPath);
                 $detalleGlobal[]    = ['archivo' => $nombreArchivo, 'fila' => '—', 'mensaje' => 'Error leyendo el archivo: ' . $e->getMessage()];
@@ -520,6 +528,10 @@ class ImportacionMasivaController extends ResourceController
                 // tal cual (si ya es mensual) -- lo decide $duplicarSueldo,
                 // que viene del botón del front para todo el lote.
                 $sueldoRaw      = $colSueldo ? preg_replace('/[^\d.]/', '', $leer($colSueldo, $r)) : '';
+                if ($sueldoRaw === '' && !empty($sueldosAsist)) {
+                    $k = $this->claveNombre($nombre . ' ' . $leer($headers['PATERNO'] ?? null, $r) . ' ' . $leer($headers['MATERNO'] ?? null, $r));
+                    if (isset($sueldosAsist[$k])) $sueldoRaw = (string)$sueldosAsist[$k];
+                }
                 $salarioMensual = $sueldoRaw !== '' ? round(((float)$sueldoRaw) * ($duplicarSueldo ? 2 : 1), 2) : null;
 
                 // Fecha_Alta -- puede venir como fecha real de Excel (numérica)
@@ -617,6 +629,41 @@ class ImportacionMasivaController extends ResourceController
             'detalle'     => $detalleGlobal,
             'por_archivo' => $resumenPorArchivo,
         ]);
+    }
+
+
+    /** Clave para comparar nombres sin importar el orden ni acentos: tokens en mayúsculas ordenados. */
+    private function claveNombre(string $n): string
+    {
+        $n = strtr(mb_strtoupper($n, 'UTF-8'), ['Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ü'=>'U','Ñ'=>'N']);
+        $t = preg_split('/[^A-Z]+/', $n, -1, PREG_SPLIT_NO_EMPTY);
+        sort($t);
+        return implode(' ', $t);
+    }
+
+    /** Lee la hoja "Asistencia" (Nombre Completo + Sueldo) y devuelve [claveNombre => sueldo]. */
+    private function sueldosDeAsistencia($sheet): array
+    {
+        if (!$sheet) return [];
+        $maxCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($sheet->getHighestColumn());
+        $hRow = null; $cNom = null; $cSue = null;
+        for ($r = 1; $r <= min(15, $sheet->getHighestRow()); $r++) {
+            $n = null; $sd = null;
+            for ($c = 1; $c <= $maxCol; $c++) {
+                $v = $this->normalizarHeader(trim((string)($sheet->getCell([$c, $r])->getValue() ?? '')));
+                if ($v === 'NOMBRECOMPLETO') $n = $c;
+                if ($v === 'SUELDO' && $sd === null) $sd = $c;
+            }
+            if ($n && $sd) { $hRow = $r; $cNom = $n; $cSue = $sd; break; }
+        }
+        if (!$hRow) return [];
+        $map = [];
+        for ($r = $hRow + 1; $r <= $sheet->getHighestRow(); $r++) {
+            $nom = trim((string)($sheet->getCell([$cNom, $r])->getValue() ?? ''));
+            $sue = preg_replace('/[^\d.]/', '', (string)($sheet->getCell([$cSue, $r])->getValue() ?? ''));
+            if ($nom !== '' && $sue !== '') $map[$this->claveNombre($nom)] = $sue;
+        }
+        return $map;
     }
 
     /**

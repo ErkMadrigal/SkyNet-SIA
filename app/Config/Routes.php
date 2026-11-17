@@ -194,9 +194,11 @@ $routes->group('api', function ($routes) {
         $routes->group('lector-biometrico', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->post('importar',       'Api\V1\LectorBiometricoController::importar');
             $routes->get('resumen',         'Api\V1\LectorBiometricoController::resumen');
+            $routes->get('registros',       'Api\V1\LectorBiometricoController::registros');
             $routes->get('movimientos',     'Api\V1\LectorBiometricoController::movimientos');
             $routes->get('personas',        'Api\V1\LectorBiometricoController::personas');
             $routes->get('empleados',       'Api\V1\LectorBiometricoController::empleados');
+            $routes->get('empleado/(:num)', 'Api\V1\LectorBiometricoController::deEmpleado/$1');
             $routes->post('asignar',        'Api\V1\LectorBiometricoController::asignar');
             $routes->post('asignar-masivo', 'Api\V1\LectorBiometricoController::asignarMasivo');
         });
