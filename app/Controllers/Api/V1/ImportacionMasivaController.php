@@ -367,7 +367,7 @@ class ImportacionMasivaController extends ResourceController
 
         $origen    = trim((string)($this->request->getVar('origen') ?? '')) ?: null;
         $idCliente = (int)($this->request->getVar('id_cliente') ?? 0);
-        if ($idCliente <= 0) $idCliente = 100; // default acordado para esta carga
+        // Sin id_cliente por defecto: si no se manda, no se toca esa columna.
 
         // Id de lote -- lo genera el front (crypto.randomUUID()) una sola
         // vez por sesión de envío y lo manda igual en cada archivo. Sirve
@@ -580,12 +580,12 @@ class ImportacionMasivaController extends ResourceController
                     'clave_interbancaria'   => $leer($headers['CLABE_INTERBANCARIA'] ?? null, $r) ?: null,
                     'salario_mensual'       => $salarioMensual,
                     'modo_sueldo'           => 'salario',
-                    'id_cliente'            => $idCliente,
                     'carga_masiva'          => 1,
                     'origen_carga_temporal' => $origen,
                     'lote_importacion'      => $loteId,
                     'created_at'            => date('Y-m-d H:i:s'),
                 ];
+                if ($idCliente > 0) $batch[count($batch) - 1]['id_cliente'] = $idCliente;
 
                 if (count($batch) >= 500) {
                     $insertadosArchivo += $this->insertarLoteAltas($db, $batch, $nombreArchivo, $detalleGlobal, $erroresArchivo);
