@@ -11,8 +11,9 @@
 @base     = https://serprosep.vinculasag.com/api/v1
 @base_ping = https://serprosep.vinculasag.com/api/ping
 
-@consulta_key = PON_AQUI_LA_CONSULTA_API_KEY
 @apikey   = k8sd7f9a2v1b4mzqp0xlj5ngtu3wrceh
+@CONSULTA_API_KEY = 07966bcdd78c2ed42ac594b9656c7e5f97dcd0d1623368be
+
 @token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzk1NDU2NTY0LCJleHAiOjE3OTU0NjAxNjQsImp0aSI6ImU1Nzc5YzIwLTZhZjEtNGUyOC05MzY0LTk0MDk1NTZhNGYyMiIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdLCJ2aXN0YXMiOlsiYWRtaW4uYWN0dWFsaXphciIsImFkbWluLmVsaW1pbmFyIiwiYWRtaW4uY3JlYXIiLCJhZG1pbi5sZWVyIl19fQ.7FLzWDu-7p2xs0Rbhso124lzMS2ndejfkUH-FEXadEk
 @refresh  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzk1NDU2NTY0LCJleHAiOjE3OTYwNjEzNjQsImp0aSI6ImU1Nzc5YzIwLTZhZjEtNGUyOC05MzY0LTk0MDk1NTZhNGYyMiIsInN1YiI6MSwidG9rZW5fdHlwZSI6InJlZnJlc2gifQ.4PqFU8HSMWor2GfUuxlCR_iu7hSJBXEj43dYbgQClpI
 
@@ -938,21 +939,42 @@ GET {{base}}/biometrico/buscar-sync?query=000178
 GET {{base}}/biometrico/ubicacion-cercana?lat=19.4326&lon=-99.1332
 
 # ════════════════════════════════════════════════════════════
-#  EMPLEADOS — CONSULTA (sin login, key propia CONSULTA_API_KEY)
+#  EMPLEADOS — CONSULTA (sin login, solo X-API-KEY)
 # ════════════════════════════════════════════════════════════
 
 ### Un solo cuadro: coincide con RFC, CURP o NSS
 GET {{base}}/empleados/consulta?q=SOLM860911
-X-API-KEY: {{consulta_key}}
+X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Por RFC / CURP / NSS (una, dos o las tres; todas las enviadas deben coincidir)
 GET {{base}}/empleados/consulta?rfc=SOLM860911GF8&curp=SOLM860911HTSBPG02&nss=02158684700
-X-API-KEY: {{consulta_key}}
+X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Por número de empleado (000178 o 178)
 GET {{base}}/empleados/consulta?numero=000178
-X-API-KEY: {{consulta_key}}
+X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Con límite e incluyendo bajas
 GET {{base}}/empleados/consulta?q=SOLM&limit=100&bajas=1
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+
+# ════════════════════════════════════════════════════════════
+#  SERVICIOS — COORDENADAS POR ZONA (sin login, key propia CONSULTA_API_KEY)
+# ════════════════════════════════════════════════════════════
+
+### Catálogo de zonas (para saber qué id/nombre mandar)
+GET {{base}}/servicios/zonas
+X-API-KEY: {{consulta_key}}
+
+### Servicios y coordenadas de una zona (por id)
+GET {{base}}/servicios/coordenadas?zona=3
+X-API-KEY: {{consulta_key}}
+
+### Por nombre de zona, solo los que tienen coordenadas
+GET {{base}}/servicios/coordenadas?zona=TAMPICO&solo_con_coordenadas=1
+X-API-KEY: {{consulta_key}}
+
+### Por nombre del servicio
+GET {{base}}/servicios/coordenadas?q=CENTRO&limit=100
 X-API-KEY: {{consulta_key}}
