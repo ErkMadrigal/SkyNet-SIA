@@ -38,6 +38,8 @@ $routes->group('api', function ($routes) {
         $routes->get('audit-log', 'Api\V1\AuditController::index', ['filter' => 'jwt:admin']);
 
         $routes->get('empleados/buscar-rapido', 'Api\V1\EmpleadosController::buscarRapido');
+        // Consulta de empleados por RFC / CURP / NSS / número (sin login; solo API Key en X-API-KEY)
+        $routes->get('empleados/consulta', 'Api\V1\EmpleadosConsultaController::consultar', ['filter' => 'apikey']);
 
 
         /* ── NÓMINA ── */

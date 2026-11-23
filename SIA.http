@@ -5,15 +5,15 @@
 # Variables globales — ajusta según tu entorno
 # ============================================================
 
-@base     = http://localhost/SkyNet-SIA/public/api/v1
-@base_ping = http://localhost/SkyNet-SIA/public/api/ping
+# @base     = http://localhost/SkyNet-SIA/public/api/v1
+# @base_ping = http://localhost/SkyNet-SIA/public/api/ping
 
-# @base     = https://serprosep.vinculasag.com/api/v1
-# @base_ping = https://serprosep.vinculasag.com/api/ping
+@base     = https://serprosep.vinculasag.com/api/v1
+@base_ping = https://serprosep.vinculasag.com/api/ping
 
 @apikey   = k8sd7f9a2v1b4mzqp0xlj5ngtu3wrceh
-@token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzgxMzAwOTYyLCJleHAiOjE3ODEzMDQ1NjIsImp0aSI6IjU3Zjc2YWVjLTZmYjYtNGE5My04ZGM0LWZhZTFjYmE2NmYwNCIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdfX0.8szToispp3YOZ3FAi4hVkqtpj1mDpVEzOKBnplQvYf8
-@refresh  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzgxMzAwOTYyLCJleHAiOjE3ODE5MDU3NjIsImp0aSI6IjU3Zjc2YWVjLTZmYjYtNGE5My04ZGM0LWZhZTFjYmE2NmYwNCIsInN1YiI6MSwidG9rZW5fdHlwZSI6InJlZnJlc2gifQ.LIb2YIWVC0Yn82pbwVqwtd4U-U-S-7DrJ_yvi3R4qdM
+@token    = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzk1NDU2NTY0LCJleHAiOjE3OTU0NjAxNjQsImp0aSI6ImU1Nzc5YzIwLTZhZjEtNGUyOC05MzY0LTk0MDk1NTZhNGYyMiIsInN1YiI6MSwiZGF0YSI6eyJpZCI6MSwibmFtZV91c2VyIjoiU3VwZXJBZG1pbiIsIm5vbWJyZSI6IlN1cGVyQWRtaW4gYWRtaW4gYWRtaW4iLCJjb3JyZW8iOiJhZG1pbkBleGFtcGxlLmNvbSIsInJvbCI6MSwicm9sX3NsdWciOiJzdXBlcmFkbWluIiwibml2ZWwiOjEsImVtcHJlc2FfZGVmYXVsdCI6bnVsbCwiZW1wcmVzYXMiOltdLCJ2aXN0YXMiOlsiYWRtaW4uYWN0dWFsaXphciIsImFkbWluLmVsaW1pbmFyIiwiYWRtaW4uY3JlYXIiLCJhZG1pbi5sZWVyIl19fQ.7FLzWDu-7p2xs0Rbhso124lzMS2ndejfkUH-FEXadEk
+@refresh  = eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJTa3lOZXQtU0lBIiwiaWF0IjoxNzk1NDU2NTY0LCJleHAiOjE3OTYwNjEzNjQsImp0aSI6ImU1Nzc5YzIwLTZhZjEtNGUyOC05MzY0LTk0MDk1NTZhNGYyMiIsInN1YiI6MSwidG9rZW5fdHlwZSI6InJlZnJlc2gifQ.4PqFU8HSMWor2GfUuxlCR_iu7hSJBXEj43dYbgQClpI
 
 
 
@@ -35,8 +35,8 @@ POST {{base}}/auth/login HTTP/1.1
 Content-Type: application/json
 
 {
-  "name_user": "c.rosado.c",
-  "password": "559207"
+  "name_user": "SuperAdmin",
+  "password": "Administra2026!"
 }
 
 
@@ -935,3 +935,23 @@ GET {{base}}/biometrico/buscar-sync?query=000178
 
 ### 90 obtener la ubicacion del telefono 
 GET {{base}}/biometrico/ubicacion-cercana?lat=19.4326&lon=-99.1332
+
+# ════════════════════════════════════════════════════════════
+#  EMPLEADOS — CONSULTA (sin login, solo X-API-KEY)
+# ════════════════════════════════════════════════════════════
+
+### Un solo cuadro: coincide con RFC, CURP o NSS
+GET {{base}}/empleados/consulta?q=SOLM860911
+X-API-KEY: {{apikey}}
+
+### Por RFC / CURP / NSS (una, dos o las tres; todas las enviadas deben coincidir)
+GET {{base}}/empleados/consulta?rfc=SOLM860911GF8&curp=SOLM860911HTSBPG02&nss=02158684700
+X-API-KEY: {{apikey}}
+
+### Por número de empleado (000178 o 178)
+GET {{base}}/empleados/consulta?numero=000178
+X-API-KEY: {{apikey}}
+
+### Con límite e incluyendo bajas
+GET {{base}}/empleados/consulta?q=SOLM&limit=100&bajas=1
+X-API-KEY: {{apikey}}

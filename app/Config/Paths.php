@@ -61,9 +61,24 @@ class Paths
     // public string $appDirectory = __DIR__ . '/..';
     // public string $writableDirectory = __DIR__ . '/../../writable';
 
-    public string $systemDirectory   = '/home1/santi299/repositories/SkyNet-SIA/vendor/codeigniter4/framework/system';
-    public string $writableDirectory = '/home1/santi299/repositories/SkyNet-SIA/writable';
-    public string $appDirectory      = '/home1/santi299/repositories/SkyNet-SIA/app';
+    // Servidor (producción) o local: se elige solo según exista la ruta del servidor.
+    public string $systemDirectory;
+    public string $writableDirectory;
+    public string $appDirectory;
+
+    public function __construct()
+    {
+        $srv = '/home1/santi299/repositories/SkyNet-SIA';
+        if (is_dir($srv)) {
+            $this->systemDirectory   = $srv . '/vendor/codeigniter4/framework/system';
+            $this->writableDirectory = $srv . '/writable';
+            $this->appDirectory      = $srv . '/app';
+        } else {
+            $this->systemDirectory   = __DIR__ . '/../../vendor/codeigniter4/framework/system';
+            $this->writableDirectory = __DIR__ . '/../../writable';
+            $this->appDirectory      = __DIR__ . '/..';
+        }
+    }
 
 
     /**
