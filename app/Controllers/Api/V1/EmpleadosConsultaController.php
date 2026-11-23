@@ -5,7 +5,7 @@ namespace App\Controllers\Api\V1;
 use CodeIgniter\RESTful\ResourceController;
 
 /**
- * Consulta de empleados (solo lectura). Sin login: requiere únicamente el header X-API-KEY.
+ * Consulta de empleados (solo lectura). Sin login: requiere el header X-API-KEY con la key propia CONSULTA_API_KEY (.env).
  *
  *   GET empleados/consulta?q=...                 un solo cuadro: coincide con RFC, CURP o NSS
  *   GET empleados/consulta?rfc=&curp=&nss=       una, dos o las tres (todas las enviadas deben coincidir)
@@ -18,8 +18,21 @@ class EmpleadosConsultaController extends ResourceController
 {
     protected $format = 'json';
 
+    /** Key propia de esta consulta (.env: CONSULTA_API_KEY) y, opcional, lista de IPs (CONSULTA_IPS=1.2.3.4,5.6.7.8). */
+    private function autorizado(): bool
+    {
+        $key = (string)env('CONSULTA_API_KEY', '');
+        $rec = $this->request->getHeaderLine('X-API-KEY') ?: (string)($this->request->getGet('api_key') ?? '');
+        if ($key === '' || $rec === '' || !hash_equals($key, $rec)) return false;
+        $ips = array_filter(array_map('trim', explode(',', (string)env('CONSULTA_IPS', ''))));
+        return !$ips || in_array($this->request->getIPAddress(), $ips, true);
+    }
+
     public function consultar()
     {
+        if (!$this->autorizado()) {
+            return $this->respond(['status' => 'error', 'message' => 'API Key inválida o no proporcionada'], 401);
+        }
         $g = fn($k) => trim((string)($this->request->getGet($k) ?? ''));
         $filtros = array_filter(['rfc' => $g('rfc'), 'curp' => $g('curp'), 'nss' => $g('nss')], fn($v) => $v !== '');
         if ($g('numero') !== '') return $this->buscar('id', $g('numero'));
