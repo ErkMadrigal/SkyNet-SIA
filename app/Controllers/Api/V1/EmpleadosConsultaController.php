@@ -51,9 +51,12 @@ class EmpleadosConsultaController extends ResourceController
             $where[] = 'e.id = ?'; $par[] = $n;
         } elseif ($campo === 'todos') {
             $cs = [];
+            $soloDigitos = ctype_digit(preg_replace('/\s+/', '', $valor));
             foreach (['rfc', 'curp', 'nss'] as $c) {
+                if ($c === 'nss' && !$soloDigitos) continue;
+                $p2 = [];
                 $x = $this->cond($c, $valor, $p2);
-                if ($x !== null && !($c === 'nss' && !ctype_digit(preg_replace('/\s+/', '', $valor)))) { $cs[] = $x; $par[] = array_pop($p2); }
+                if ($x !== null) { $cs[] = $x; $par[] = $p2[0]; }
             }
             if (!$cs) return $this->respond($minimo, 422);
             $where[] = '(' . implode(' OR ', $cs) . ')';
