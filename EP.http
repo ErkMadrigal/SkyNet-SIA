@@ -1,0 +1,45 @@
+@base     = https://serprosep.vinculasag.com/api/v1
+@base_ping = https://serprosep.vinculasag.com/api/ping
+
+@CONSULTA_API_KEY = 07966bcdd78c2ed42ac594b9656c7e5f97dcd0d1623368be
+
+
+# ════════════════════════════════════════════════════════════
+#  EMPLEADOS — CONSULTA (sin login, solo X-API-KEY)
+# ════════════════════════════════════════════════════════════
+
+### Un solo cuadro: coincide con RFC, CURP o NSS
+GET {{base}}/empleados/consulta?q=mafe990706
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+### Por RFC / CURP / NSS (una, dos o las tres; todas las enviadas deben coincidir)
+GET {{base}}/empleados/consulta?rfc=MAFE990706DU3&curp=MAFE990706HMCDLR05&nss=16988040149
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+### Por número de empleado (000178 o 178)
+GET {{base}}/empleados/consulta?numero=000178
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+### Con límite e incluyendo bajas
+GET {{base}}/empleados/consulta?q=mafe990706&limit=100&bajas=1
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+# ════════════════════════════════════════════════════════════
+#  SERVICIOS — COORDENADAS POR ZONA (sin login, key propia CONSULTA_API_KEY)
+# ════════════════════════════════════════════════════════════
+
+### Catálogo de zonas (para saber qué id/nombre mandar)
+GET {{base}}/servicios/zonas
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+### Servicios y coordenadas de una zona (por id)
+GET {{base}}/servicios/coordenadas?zona=3
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+### Por nombre de zona, solo los que tienen coordenadas
+GET {{base}}/servicios/coordenadas?zona=MEXIBUS_LINEA_3
+X-API-KEY: {{CONSULTA_API_KEY}}
+
+### Por nombre del servicio
+GET {{base}}/servicios/coordenadas?q=los_patos&limit=100
+X-API-KEY: {{CONSULTA_API_KEY}}

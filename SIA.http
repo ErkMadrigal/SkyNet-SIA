@@ -965,16 +965,16 @@ X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Catálogo de zonas (para saber qué id/nombre mandar)
 GET {{base}}/servicios/zonas
-X-API-KEY: {{consulta_key}}
+X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Servicios y coordenadas de una zona (por id)
 GET {{base}}/servicios/coordenadas?zona=3
-X-API-KEY: {{consulta_key}}
+X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Por nombre de zona, solo los que tienen coordenadas
-GET {{base}}/servicios/coordenadas?zona=TAMPICO&solo_con_coordenadas=1
-X-API-KEY: {{consulta_key}}
+GET {{base}}/servicios/coordenadas?zona=MEXIBUS_LINEA_3
+X-API-KEY: {{CONSULTA_API_KEY}}
 
 ### Por nombre del servicio
-GET {{base}}/servicios/coordenadas?q=CENTRO&limit=100
-X-API-KEY: {{consulta_key}}
+GET {{base}}/servicios/coordenadas?q=los_patos&limit=100
+X-API-KEY: {{CONSULTA_API_KEY}}
