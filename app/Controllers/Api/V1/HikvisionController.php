@@ -25,7 +25,7 @@ class HikvisionController extends ResourceController
         if ($tokenCfg === '' || $tok === '' || !hash_equals($tokenCfg, $tok)) {
             return $this->respond(['status' => 'error', 'message' => 'Token inválido'], 401);
         }
-        if ($this->request->getMethod() === 'get') return $this->respond(['status' => 'ok', 'message' => 'Receptor activo']);
+        if (strtolower((string)$this->request->getMethod()) === 'get') return $this->respond(['status' => 'ok', 'message' => 'Receptor activo']);
 
         $raw = (string)$this->request->getBody();
         $ct  = $this->request->getHeaderLine('Content-Type');
