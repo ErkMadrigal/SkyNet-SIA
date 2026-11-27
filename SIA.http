@@ -1057,7 +1057,7 @@ X-API-KEY: {{webhook_key}}
 # ════════════════════════════════════════════════════════════
 #  HIKVISION — receptor de eventos (clave en la URL: HIKVISION_TOKEN)
 # ════════════════════════════════════════════════════════════
-@hik_token = PON_AQUI_EL_HIKVISION_TOKEN
+@hik_token = f6a6902bfc4ffb908f719501ae2f7dbc
 
 ### Prueba de conexión (debe responder "Receptor activo")
 GET {{base}}/webhooks/hikvision?token={{hik_token}}
@@ -1073,8 +1073,8 @@ Content-Type: application/json
   "AccessControllerEvent": {
     "majorEventType": 5,
     "subEventType": 75,
-    "name": "JUAN PEREZ",
-    "employeeNoString": "178",
+    "name": "JUAN ESQUIVEL QUIROZ",
+    "employeeNoString": "001",
     "currentVerifyMode": "face"
   }
 }

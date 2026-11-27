@@ -214,6 +214,12 @@ $routes->group('api', function ($routes) {
             $routes->post('asignar',        'Api\V1\LectorBiometricoController::asignar');
             $routes->post('asignar-masivo', 'Api\V1\LectorBiometricoController::asignarMasivo');
         });
+        $routes->group('biometricos', ['filter' => 'jwt:admin'], function ($routes) {
+            $routes->get('equipos',        'Api\V1\BiometricosController::equipos');
+            $routes->post('equipos',       'Api\V1\BiometricosController::crear');
+            $routes->put('equipos/(:num)', 'Api\V1\BiometricosController::actualizar/$1');
+            $routes->get('marcaciones',    'Api\V1\BiometricosController::marcaciones');
+        });
         $routes->group('dispositivos', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->get('alertas',      'Api\V1\DispositivosController::alertas');
             $routes->get('versiones',    'Api\V1\DispositivosController::versiones');

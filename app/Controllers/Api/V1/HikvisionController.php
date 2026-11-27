@@ -46,11 +46,31 @@ class HikvisionController extends ResourceController
         $texto = mb_substr(preg_replace('/[^\x09\x0A\x0D\x20-\x7E\xC2-\xF4\x80-\xBF]+/', ' ', $raw), 0, 60000);
 
         $f = $this->extraer($texto);
+        // Sin número de persona no es una marcación (intentos no reconocidos, pasos intermedios, puerta, etc.):
+        // se responde 200 sin tocar la base para no saturar el servidor.
+        if ($f['empleado_no'] === '') return $this->respond(['status' => 'ok']);
         $db = \Config\Database::connect();
         $idEmp = null; $insertado = 0;
 
+        // 1) Equipo (por MAC): se da de alta solo la primera vez y se actualiza su último evento
+        $idEquipo = null;
+        if ($f['mac'] !== '') {
+            try {
+                $q = $db->query('SELECT id FROM biometricos_equipos WHERE mac = ? LIMIT 1', [$f['mac']])->getRowArray();
+                if ($q) {
+                    $idEquipo = (int)$q['id'];
+                    $db->query('UPDATE biometricos_equipos SET ultimo_evento_at = NOW(), eventos_total = eventos_total + 1, ip = COALESCE(NULLIF(?, \'\'), ip) WHERE id = ?', [mb_substr($f['ip_equipo'], 0, 45), $idEquipo]);
+                } else {
+                    $db->query('INSERT INTO biometricos_equipos (nombre, mac, ip, auto_registrado, ultimo_evento_at, eventos_total) VALUES (?,?,?,1,NOW(),1)',
+                        ['Equipo ' . $f['mac'], $f['mac'], mb_substr($f['ip_equipo'], 0, 45)]);
+                    $idEquipo = (int)$db->insertID();
+                }
+            } catch (\Throwable $e) { log_message('error', 'Hikvision equipo: ' . $e->getMessage()); }
+        }
+
+        // 2) Marcación ligada al empleado (por id_biometrico)
         try {
-            if ($f['empleado_no'] !== '' && $f['fecha'] !== null) {
+            if ($f['fecha'] !== null) {
                 $e = $db->query('SELECT id FROM empleados WHERE id_biometrico = ? LIMIT 1', [$f['empleado_no']])->getRowArray();
                 if ($e) {
                     $idEmp = (int)$e['id'];
@@ -62,15 +82,21 @@ class HikvisionController extends ResourceController
                     $insertado = $db->affectedRows() > 0 ? 1 : 0;
                 }
             }
-            $db->table('hikvision_eventos')->insert([
-                'recibido_at' => date('Y-m-d H:i:s'), 'ip' => $this->request->getIPAddress(), 'content_type' => mb_substr($ct, 0, 120),
-                'empleado_no' => mb_substr($f['empleado_no'], 0, 40), 'nombre' => mb_substr($f['nombre'], 0, 120),
-                'fecha_evento' => $f['fecha'] ? $f['fecha'] . ' ' . $f['hora'] : null, 'dispositivo' => mb_substr($f['dispositivo'], 0, 80),
-                'major' => $f['major'], 'minor' => $f['minor'], 'metodo' => mb_substr($f['metodo'], 0, 30),
-                'id_empleado' => $idEmp, 'registrado' => $insertado, 'crudo' => mb_substr($texto, 0, 20000),
-            ]);
+        } catch (\Throwable $e) { log_message('error', 'Hikvision log: ' . $e->getMessage()); }
+
+        // 3) Bitácora del evento (con respaldo si aún no se corre la migración de equipos)
+        $fila = [
+            'recibido_at' => date('Y-m-d H:i:s'), 'ip' => $this->request->getIPAddress(), 'content_type' => mb_substr($ct, 0, 120),
+            'empleado_no' => mb_substr($f['empleado_no'], 0, 40), 'nombre' => mb_substr($f['nombre'], 0, 120),
+            'fecha_evento' => $f['fecha'] ? $f['fecha'] . ' ' . $f['hora'] : null, 'dispositivo' => mb_substr($f['dispositivo'], 0, 80),
+            'major' => $f['major'], 'minor' => $f['minor'], 'metodo' => mb_substr($f['metodo'], 0, 30),
+            'id_empleado' => $idEmp, 'registrado' => $insertado, 'crudo' => mb_substr($texto, 0, 4000),
+        ];
+        try {
+            $db->table('hikvision_eventos')->insert($fila + ['mac' => $f['mac'] !== '' ? $f['mac'] : null, 'id_equipo' => $idEquipo]);
         } catch (\Throwable $e) {
-            log_message('error', 'Hikvision: ' . $e->getMessage());
+            try { $db->table('hikvision_eventos')->insert($fila); }
+            catch (\Throwable $e2) { log_message('error', 'Hikvision: ' . $e2->getMessage()); }
         }
         return $this->respond(['status' => 'ok']);
     }
@@ -96,6 +122,7 @@ class HikvisionController extends ResourceController
         return [
             'empleado_no' => trim($no), 'nombre' => $g('name'), 'fecha' => $fecha, 'hora' => $hora,
             'dispositivo' => $g('deviceName') ?: $g('ipAddress'),
+            'mac' => strtolower(trim($g('macAddress'))), 'ip_equipo' => $g('ipAddress'),
             'major' => $g('majorEventType') !== '' ? (int)$g('majorEventType') : null,
             'minor' => $g('subEventType') !== '' ? (int)$g('subEventType') : null,
             'metodo' => $g('currentVerifyMode'),
