@@ -42,6 +42,8 @@ $routes->group('api', function ($routes) {
         $routes->get('empleados/consulta', 'Api\V1\EmpleadosConsultaController::consultar');
         // Webhook: la plataforma de empleados avisa de altas/cambios (key propia WEBHOOK_EMPLEADOS_KEY, se valida en el controlador)
         $routes->post('webhooks/empleados', 'Api\V1\WebhookEmpleadosController::recibir');
+        // Receptor de eventos Hikvision (clave en la URL: ?token=HIKVISION_TOKEN)
+        $routes->match(['get', 'post'], 'webhooks/hikvision', 'Api\V1\HikvisionController::recibir');
         $routes->get('webhooks/empleados/estado',      'Api\V1\WebhookEmpleadosController::estado');
         $routes->get('webhooks/empleados/asistencias', 'Api\V1\WebhookEmpleadosController::asistencias');
         $routes->post('webhooks/empleados/confirmar', 'Api\V1\WebhookEmpleadosController::confirmar');

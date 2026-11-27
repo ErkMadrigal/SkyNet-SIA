@@ -84,7 +84,7 @@ GET {{base}}/webhooks/empleados/estado?curp=MAFE990706HMCDLR05
 X-API-KEY: {{webhook_key}}
 
 ###
-GET {{base}}/webhooks/empleados/estado?numero=000178,000177
+GET {{base}}/webhooks/empleados/estado?numero=000178,000177,031669
 X-API-KEY: {{webhook_key}}
 
 ### La otra plataforma confirma "ya lo tengo" (SIAG solo marca la fecha; no borra nada)
@@ -94,6 +94,27 @@ X-API-KEY: {{webhook_key}}
 
 {
   "empleados": [
-    { "numero_empleado": "033063", "curp": "ABCD900101HDFXXX00" }
+    { "numero_empleado": "000178", "curp": "MAFE990706hmcdlr05" }
   ]
 }
+
+
+### Entradas y salidas de un empleado: hoy
+GET {{base}}/webhooks/empleados/asistencias?numero=031669&periodo=hoy
+X-API-KEY: {{webhook_key}}
+
+### De la semana (lunes a domingo)
+GET {{base}}/webhooks/empleados/asistencias?numero=031669&periodo=semana
+X-API-KEY: {{webhook_key}}
+
+### De la quincena (1 al 15, o 16 al fin de mes) por CURP
+GET {{base}}/webhooks/empleados/asistencias?curp=GOGT020310MMCNLHA0&periodo=quincena
+X-API-KEY: {{webhook_key}}
+
+### Quincena de otra fecha
+GET {{base}}/webhooks/empleados/asistencias?numero=031669&periodo=quincena&fecha=2026-11-05
+X-API-KEY: {{webhook_key}}
+
+### Rango de fechas (máx. 93 días)
+GET {{base}}/webhooks/empleados/asistencias?numero=031669&periodo=rango&desde=2026-11-01&hasta=2026-11-15
+X-API-KEY: {{webhook_key}}
