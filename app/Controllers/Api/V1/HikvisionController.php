@@ -27,7 +27,20 @@ class HikvisionController extends ResourceController
         }
         if (strtolower((string)$this->request->getMethod()) === 'get') return $this->respond(['status' => 'ok', 'message' => 'Receptor activo']);
 
-        $raw = (string)$this->request->getBody();
+        // Cuerpo directo (JSON/XML). En multipart PHP lo deja vacío y reparte las partes en $_POST / $_FILES.
+        $raw = (string)@file_get_contents('php://input');
+        foreach ($_POST as $k => $v) {
+            $raw .= "\n" . (is_array($v) ? json_encode($v, JSON_UNESCAPED_UNICODE) : (string)$v);
+        }
+        foreach ($_FILES as $k => $fl) {
+            // Solo partes de texto (event_log en JSON/XML); las imágenes se ignoran
+            $tipo = (string)($fl['type'] ?? '');
+            $tmp  = $fl['tmp_name'] ?? '';
+            if (is_string($tmp) && $tmp !== '' && is_file($tmp) && (int)($fl['size'] ?? 0) < 200000
+                && (stripos($tipo, 'json') !== false || stripos($tipo, 'xml') !== false || stripos($tipo, 'text') !== false || stripos((string)$k, 'event') !== false)) {
+                $raw .= "\n" . (string)@file_get_contents($tmp);
+            }
+        }
         $ct  = $this->request->getHeaderLine('Content-Type');
         // Se quitan las imágenes binarias (multipart): solo interesan los textos/JSON
         $texto = mb_substr(preg_replace('/[^\x09\x0A\x0D\x20-\x7E\xC2-\xF4\x80-\xBF]+/', ' ', $raw), 0, 60000);
