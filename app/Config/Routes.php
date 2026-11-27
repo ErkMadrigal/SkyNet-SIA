@@ -43,6 +43,7 @@ $routes->group('api', function ($routes) {
         // Webhook: la plataforma de empleados avisa de altas/cambios (key propia WEBHOOK_EMPLEADOS_KEY, se valida en el controlador)
         $routes->post('webhooks/empleados', 'Api\V1\WebhookEmpleadosController::recibir');
         $routes->get('webhooks/empleados/estado',      'Api\V1\WebhookEmpleadosController::estado');
+        $routes->get('webhooks/empleados/asistencias', 'Api\V1\WebhookEmpleadosController::asistencias');
         $routes->post('webhooks/empleados/confirmar', 'Api\V1\WebhookEmpleadosController::confirmar');
         // Servicios y coordenadas por zona (misma key: CONSULTA_API_KEY)
         $routes->get('servicios/coordenadas', 'Api\V1\ServiciosConsultaController::coordenadas', ['filter' => 'consultaKey']);

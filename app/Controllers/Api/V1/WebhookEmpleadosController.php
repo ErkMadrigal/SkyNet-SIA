@@ -32,6 +32,8 @@ use CodeIgniter\RESTful\ResourceController;
  *
  *   GET  /api/v1/webhooks/empleados/estado?curp=A,B&numero=033063&id_externo=uuid   (hasta 100)
  *        ¿ya tiene rostro enrolado? Regresa rostro_enrolado, y si ya fue confirmado como migrado.
+ *   GET  /api/v1/webhooks/empleados/asistencias?numero=033063&periodo=hoy|semana|quincena|mes|rango[&desde=&hasta=&fecha=]
+ *        entradas y salidas de UN empleado (identificado por numero, curp o id_externo) en el periodo pedido.
  *   POST /api/v1/webhooks/empleados/confirmar   {"empleados":[{"numero_empleado":"033063","curp":"..."}]}
  *        la otra plataforma confirma "ya lo tengo": SIAG marca la fecha (migrado_at). No borra nada.
  */
@@ -218,6 +220,97 @@ class WebhookEmpleadosController extends ResourceController
         foreach ($exts as $x)   if (!isset($hallados['e:' . $x])) $no[] = $x;
 
         return $this->respond(['status' => 'ok', 'total' => count($data), 'data' => $data, 'no_encontrados' => $no]);
+    }
+
+    /** GET asistencias: entradas y salidas de un empleado (hoy, semana, quincena, mes o rango de fechas). */
+    public function asistencias()
+    {
+        if (!$this->autorizado()) return $this->respond(['status' => 'error', 'message' => 'API Key inválida o no proporcionada'], 401);
+
+        $g = fn($k) => trim((string)($this->request->getGet($k) ?? ''));
+        $numero = (int)preg_replace('/\D/', '', $g('numero'));
+        $curp   = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $g('curp')));
+        $ext    = $g('id_externo');
+        if ($numero <= 0 && $curp === '' && $ext === '') {
+            return $this->respond(['status' => 'error', 'message' => 'Manda numero, curp o id_externo del empleado'], 422);
+        }
+
+        // ── Periodo (fechas en hora de México) ──
+        $tz  = new \DateTimeZone('America/Mexico_City');
+        $ref = $g('fecha') !== '' ? \DateTime::createFromFormat('Y-m-d', $g('fecha'), $tz) : new \DateTime('now', $tz);
+        if (!$ref) return $this->respond(['status' => 'error', 'message' => 'fecha inválida (usa AAAA-MM-DD)'], 422);
+        $periodo = strtolower($g('periodo') ?: 'hoy');
+        $d = clone $ref; $h = clone $ref;
+        switch ($periodo) {
+            case 'hoy': break;
+            case 'semana':   // lunes a domingo de la semana de la fecha
+                $d->modify('monday this week'); $h = (clone $d)->modify('+6 days');
+                if ($ref->format('N') === '7') { $d = (clone $ref)->modify('-6 days'); $h = clone $ref; }
+                break;
+            case 'quincena': // 1 al 15, o 16 al último día del mes
+                if ((int)$ref->format('j') <= 15) { $d->setDate((int)$ref->format('Y'), (int)$ref->format('n'), 1); $h->setDate((int)$ref->format('Y'), (int)$ref->format('n'), 15); }
+                else { $d->setDate((int)$ref->format('Y'), (int)$ref->format('n'), 16); $h->modify('last day of this month'); }
+                break;
+            case 'mes': $d->modify('first day of this month'); $h->modify('last day of this month'); break;
+            case 'rango':
+                $d = \DateTime::createFromFormat('Y-m-d', $g('desde'), $tz); $h = \DateTime::createFromFormat('Y-m-d', $g('hasta'), $tz);
+                if (!$d || !$h) return $this->respond(['status' => 'error', 'message' => 'Para periodo=rango manda desde y hasta (AAAA-MM-DD)'], 422);
+                break;
+            default: return $this->respond(['status' => 'error', 'message' => 'periodo debe ser hoy, semana, quincena, mes o rango'], 422);
+        }
+        if ($h < $d) return $this->respond(['status' => 'error', 'message' => 'hasta no puede ser anterior a desde'], 422);
+        if ($d->diff($h)->days > 92) return $this->respond(['status' => 'error', 'message' => 'El rango máximo es de 93 días'], 422);
+        $desde = $d->format('Y-m-d'); $hasta = $h->format('Y-m-d');
+
+        try {
+            $db = \Config\Database::connect();
+            if ($numero > 0)       $emp = $db->query('SELECT id, curp, id_externo, paterno, materno, nombre FROM empleados WHERE id = ? AND is_deleted = 0', [$numero])->getRowArray();
+            elseif ($ext !== '')   $emp = $db->query('SELECT id, curp, id_externo, paterno, materno, nombre FROM empleados WHERE id_externo = ? AND is_deleted = 0', [$ext])->getRowArray();
+            else                   $emp = $db->query('SELECT id, curp, id_externo, paterno, materno, nombre FROM empleados WHERE curp = ? AND is_deleted = 0 ORDER BY id DESC LIMIT 1', [$curp])->getRowArray();
+            if (!$emp) return $this->respond(['status' => 'error', 'message' => 'Empleado no encontrado'], 404);
+
+            $rows = $db->query(
+                "SELECT a.fecha, a.hora, a.id_status, a.estado_entrada, a.minutos_retardo, a.estado_salida, s.servicio
+                 FROM asistencias a
+                 LEFT JOIN servicios s ON s.id = a.id_ubicacion
+                 WHERE a.id_empleado = ? AND a.fecha BETWEEN ? AND ?
+                 ORDER BY a.fecha, a.hora, a.id", [(int)$emp['id'], $desde, $hasta]
+            )->getResultArray();
+        } catch (\Throwable $e) {
+            log_message('error', 'Webhook asistencias: ' . $e->getMessage());
+            return $this->respond(['status' => 'error', 'message' => 'No se pudo consultar'], 500);
+        }
+
+        $mov = []; $dias = []; $res = ['entradas' => 0, 'salidas' => 0, 'retardos' => 0, 'salidas_anticipadas' => 0];
+        foreach ($rows as $r) {
+            $esEntrada = (int)$r['id_status'] === 1;
+            $esEntrada ? $res['entradas']++ : $res['salidas']++;
+            if ($esEntrada && in_array($r['estado_entrada'], ['retardo_leve', 'retardo_grave'], true)) $res['retardos']++;
+            if (!$esEntrada && $r['estado_salida'] === 'anticipada') $res['salidas_anticipadas']++;
+            $dias[$r['fecha']] = 1;
+            $mov[] = [
+                'fecha'           => $r['fecha'],
+                'hora'            => $r['hora'],
+                'tipo'            => $esEntrada ? 'entrada' : 'salida',
+                'estado'          => $esEntrada ? $r['estado_entrada'] : $r['estado_salida'],
+                'minutos_retardo' => $esEntrada ? (int)$r['minutos_retardo'] : null,
+                'servicio'        => $r['servicio'],
+            ];
+        }
+        $res['dias_con_registro'] = count($dias);
+
+        return $this->respond([
+            'status'   => 'ok',
+            'empleado' => [
+                'numero_empleado' => str_pad((string)$emp['id'], 6, '0', STR_PAD_LEFT),
+                'id_externo'      => $emp['id_externo'],
+                'curp'            => $emp['curp'],
+                'nombre_completo' => trim($emp['paterno'] . ' ' . $emp['materno'] . ' ' . $emp['nombre']),
+            ],
+            'periodo'  => ['tipo' => $periodo, 'desde' => $desde, 'hasta' => $hasta],
+            'resumen'  => $res,
+            'data'     => $mov,
+        ]);
     }
 
     /** POST confirmar: la otra plataforma avisa "ya tengo los datos de este empleado". No borra nada en SIAG. */
