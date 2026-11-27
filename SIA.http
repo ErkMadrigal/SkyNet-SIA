@@ -978,3 +978,35 @@ X-API-KEY: {{CONSULTA_API_KEY}}
 ### Por nombre del servicio
 GET {{base}}/servicios/coordenadas?q=los_patos&limit=100
 X-API-KEY: {{CONSULTA_API_KEY}}
+
+
+# ════════════════════════════════════════════════════════════
+#  WEBHOOK — empleados nuevos / cambios (sin login, key propia WEBHOOK_EMPLEADOS_KEY)
+# ════════════════════════════════════════════════════════════
+@webhook_key = PON_AQUI_LA_WEBHOOK_EMPLEADOS_KEY
+
+### Un empleado nuevo (queda con el rostro sin enrolar)
+POST {{base}}/webhooks/empleados
+Content-Type: application/json
+X-API-KEY: {{webhook_key}}
+
+{
+  "evento": "empleado.creado",
+  "numero_empleado": "032808",
+  "id_externo": "EXT-0001",
+  "curp": "ABCD900101HDFXXX00",
+  "nombre_completo": "PEREZ LOPEZ JUAN",
+  "turno": "24x24"
+}
+
+### Varios a la vez
+POST {{base}}/webhooks/empleados
+Content-Type: application/json
+X-API-KEY: {{webhook_key}}
+
+{
+  "empleados": [
+    { "numero_empleado": "032809", "id_externo": "EXT-0002", "curp": "ABCD900101HDFXXX01", "nombre": "ANA", "paterno": "GOMEZ", "materno": "RUIZ", "turno": "12 X 12" },
+    { "numero_empleado": "032810", "id_externo": "EXT-0003", "curp": "ABCD900101HDFXXX02", "nombre": "LUIS", "paterno": "MARTINEZ", "turno": "24 X 24" }
+  ]
+}

@@ -40,6 +40,8 @@ $routes->group('api', function ($routes) {
         $routes->get('empleados/buscar-rapido', 'Api\V1\EmpleadosController::buscarRapido');
         // Consulta de empleados por RFC / CURP / NSS / número (sin login; key propia CONSULTA_API_KEY en el header X-API-KEY, se valida en el controlador)
         $routes->get('empleados/consulta', 'Api\V1\EmpleadosConsultaController::consultar');
+        // Webhook: la plataforma de empleados avisa de altas/cambios (key propia WEBHOOK_EMPLEADOS_KEY, se valida en el controlador)
+        $routes->post('webhooks/empleados', 'Api\V1\WebhookEmpleadosController::recibir');
         // Servicios y coordenadas por zona (misma key: CONSULTA_API_KEY)
         $routes->get('servicios/coordenadas', 'Api\V1\ServiciosConsultaController::coordenadas', ['filter' => 'consultaKey']);
         $routes->get('servicios/zonas',       'Api\V1\ServiciosConsultaController::zonas',       ['filter' => 'consultaKey']);
