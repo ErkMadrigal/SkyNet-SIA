@@ -97,6 +97,115 @@ class BiometricosController extends ResourceController
         return $this->respond(['status' => 'ok']);
     }
 
+    /**
+     * Asistencia unificada: por empleado y día, lo del biométrico (primera/última marcación) junto con lo de la app
+     * (entrada/salida), el origen de cada registro y la diferencia de entrada entre ambos.
+     *   ?desde=&hasta=  (máx. 31 días)  &q=  &origen=ambos|biometrico|app
+     */
+    public function asistencia()
+    {
+        if (!$this->admin()) return $this->err('Sin permiso', 403);
+        $desde = (string)($this->request->getGet('desde') ?? '');
+        $hasta = (string)($this->request->getGet('hasta') ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $desde) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $hasta)) return $this->err('Elige el rango de fechas', 422);
+        if (strtotime($hasta) < strtotime($desde)) return $this->err('La fecha final es anterior a la inicial', 422);
+        if ((strtotime($hasta) - strtotime($desde)) / 86400 > 31) return $this->err('El rango máximo es de 31 días', 422);
+        $q      = trim((string)($this->request->getGet('q') ?? ''));
+        $origen = (string)($this->request->getGet('origen') ?? '');
+        if (!in_array($origen, ['ambos', 'biometrico', 'app'], true)) $origen = '';
+        $max = 20000;
+
+        $db = \Config\Database::connect();
+        try {
+            $bio = $db->query(
+                'SELECT l.id_empleado, l.fecha, MIN(l.hora) AS primera, MAX(l.hora) AS ultima, COUNT(*) AS marcaciones
+                 FROM biometrico_logs l
+                 WHERE l.id_empleado IS NOT NULL AND l.fecha BETWEEN ? AND ?
+                 GROUP BY l.id_empleado, l.fecha', [$desde, $hasta])->getResultArray();
+        } catch (\Throwable $e) {
+            log_message('error', 'Asistencia unificada (biométrico): ' . $e->getMessage());
+            return $this->err('Falta correr migracion_lector_biometrico_2.sql', 500);
+        }
+        try {
+            $app = $db->query(
+                'SELECT id_empleado, fecha,
+                        MIN(CASE WHEN id_status = 1 THEN hora END) AS entrada,
+                        MAX(CASE WHEN id_status = 2 THEN hora END) AS salida
+                 FROM asistencias
+                 WHERE fecha BETWEEN ? AND ?
+                 GROUP BY id_empleado, fecha', [$desde, $hasta])->getResultArray();
+        } catch (\Throwable $e) {
+            log_message('error', 'Asistencia unificada (app): ' . $e->getMessage());
+            return $this->err('No se pudo leer la asistencia de la app', 500);
+        }
+
+        // Se juntan por empleado + día
+        $mapa = [];
+        foreach ($bio as $b) {
+            $k = (int)$b['id_empleado'] . '|' . $b['fecha'];
+            $mapa[$k] = ['id_empleado' => (int)$b['id_empleado'], 'fecha' => $b['fecha'],
+                'bio_primera' => $b['primera'], 'bio_ultima' => $b['ultima'], 'bio_marcaciones' => (int)$b['marcaciones'],
+                'app_entrada' => null, 'app_salida' => null];
+        }
+        foreach ($app as $a) {
+            $k = (int)$a['id_empleado'] . '|' . $a['fecha'];
+            if (!isset($mapa[$k])) {
+                $mapa[$k] = ['id_empleado' => (int)$a['id_empleado'], 'fecha' => $a['fecha'],
+                    'bio_primera' => null, 'bio_ultima' => null, 'bio_marcaciones' => 0, 'app_entrada' => null, 'app_salida' => null];
+            }
+            $mapa[$k]['app_entrada'] = $a['entrada'];
+            $mapa[$k]['app_salida']  = $a['salida'];
+        }
+
+        // Nombres y ubicación
+        $ids = array_values(array_unique(array_map(fn($r) => $r['id_empleado'], $mapa)));
+        $emp = [];
+        foreach (array_chunk($ids, 1000) as $lote) {
+            if (!$lote) continue;
+            $in = implode(',', array_map('intval', $lote));
+            foreach ($db->query(
+                "SELECT e.id, CONCAT_WS(' ', TRIM(e.nombre), TRIM(e.paterno), TRIM(e.materno)) AS empleado, s.servicio AS ubicacion
+                 FROM empleados e LEFT JOIN servicios s ON s.id = e.id_ubicacion_principal
+                 WHERE e.id IN ($in)")->getResultArray() as $e) $emp[(int)$e['id']] = $e;
+        }
+
+        $min = fn($t) => $t ? (int)round(strtotime('1970-01-01 ' . $t . ' UTC') / 60) : null;
+        $rows = [];
+        $kp = ['filas' => 0, 'ambos' => 0, 'biometrico' => 0, 'app' => 0, 'con_diferencia' => 0];
+        $personas = [];
+        foreach ($mapa as $r) {
+            $tieneBio = $r['bio_marcaciones'] > 0;
+            $tieneApp = $r['app_entrada'] !== null || $r['app_salida'] !== null;
+            $org = $tieneBio && $tieneApp ? 'ambos' : ($tieneBio ? 'biometrico' : 'app');
+            if ($origen !== '' && $org !== $origen) continue;
+            $e = $emp[$r['id_empleado']] ?? null;
+            $nombre = $e ? trim((string)$e['empleado']) : '';
+            $numero = str_pad((string)$r['id_empleado'], 6, '0', STR_PAD_LEFT);
+            if ($q !== '' && stripos($nombre, $q) === false && stripos($numero, $q) === false && (string)$r['id_empleado'] !== ltrim($q, '0')) continue;
+
+            // Diferencia de entrada: minutos que separan la entrada de la app de la primera marcación del biométrico
+            $dif = null;
+            if ($r['app_entrada'] !== null && $tieneBio) $dif = $min($r['app_entrada']) - $min($r['bio_primera']);
+
+            // Entrada / salida consolidadas: la más temprana y la más tardía entre las dos fuentes
+            $entradas = array_filter([$r['bio_primera'], $r['app_entrada']]);
+            $salidas  = array_filter([$r['bio_marcaciones'] >= 2 ? $r['bio_ultima'] : null, $r['app_salida']]);
+            $r += [
+                'numero' => $numero, 'empleado' => $nombre !== '' ? $nombre : null, 'ubicacion' => $e['ubicacion'] ?? null,
+                'origen' => $org, 'dif_entrada_min' => $dif,
+                'entrada' => $entradas ? min($entradas) : null, 'salida' => $salidas ? max($salidas) : null,
+            ];
+            $rows[] = $r;
+            $kp['filas']++; $kp[$org]++; $personas[$r['id_empleado']] = 1;
+            if ($dif !== null && abs($dif) > 15) $kp['con_diferencia']++;
+        }
+        usort($rows, fn($x, $y) => [$y['fecha'], (string)$x['empleado']] <=> [$x['fecha'], (string)$y['empleado']]);
+        $trunc = count($rows) > $max;
+        if ($trunc) $rows = array_slice($rows, 0, $max);
+        $kp['personas'] = count($personas);
+        return $this->respond(['status' => 'ok', 'truncado' => $trunc, 'resumen' => $kp, 'data' => $rows]);
+    }
+
     public function marcaciones()
     {
         if (!$this->admin()) return $this->err('Sin permiso', 403);

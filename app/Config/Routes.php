@@ -219,6 +219,7 @@ $routes->group('api', function ($routes) {
             $routes->post('equipos',       'Api\V1\BiometricosController::crear');
             $routes->put('equipos/(:num)', 'Api\V1\BiometricosController::actualizar/$1');
             $routes->get('marcaciones',    'Api\V1\BiometricosController::marcaciones');
+            $routes->get('asistencia',     'Api\V1\BiometricosController::asistencia');
         });
         $routes->group('dispositivos', ['filter' => 'jwt:admin'], function ($routes) {
             $routes->get('alertas',      'Api\V1\DispositivosController::alertas');
