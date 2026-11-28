@@ -206,6 +206,87 @@ class BiometricosController extends ResourceController
         return $this->respond(['status' => 'ok', 'truncado' => $trunc, 'resumen' => $kp, 'data' => $rows]);
     }
 
+    /**
+     * Marcaciones del biométrico de un empleado (para su perfil): últimas 10, cuántas lleva hoy y en total.
+     *   GET biometricos/empleado/(id)
+     */
+    public function deEmpleado($id = null)
+    {
+        if (!$this->admin()) return $this->err('Sin permiso', 403);
+        $id  = (int)$id;
+        $hoy = (new \DateTime('now', new \DateTimeZone('America/Mexico_City')))->format('Y-m-d');
+        $db  = \Config\Database::connect();
+        try {
+            $tot = $db->query('SELECT COUNT(*) AS total, SUM(fecha = ?) AS hoy FROM biometrico_logs WHERE id_empleado = ?', [$hoy, $id])->getRowArray();
+        } catch (\Throwable $e) {
+            return $this->respond(['status' => 'ok', 'data' => ['disponible' => false, 'hoy' => 0, 'total' => 0, 'ultimas' => []]]);
+        }
+        try {
+            $ult = $db->query(
+                "SELECT x.id, x.fecha, x.hora, x.metodo,
+                        (SELECT q.nombre FROM hikvision_eventos h JOIN biometricos_equipos q ON q.id = h.id_equipo
+                          WHERE h.id_empleado = ? AND h.fecha_evento = TIMESTAMP(x.fecha, x.hora) LIMIT 1) AS equipo
+                 FROM (SELECT id, fecha, hora, metodo FROM biometrico_logs WHERE id_empleado = ? ORDER BY fecha DESC, hora DESC LIMIT 10) x
+                 ORDER BY x.fecha DESC, x.hora DESC", [$id, $id])->getResultArray();
+        } catch (\Throwable $e) {
+            // Sin tabla de equipos todavía: solo la marcación
+            $ult = $db->query('SELECT id, fecha, hora, metodo, NULL AS equipo FROM biometrico_logs WHERE id_empleado = ? ORDER BY fecha DESC, hora DESC LIMIT 10', [$id])->getResultArray();
+        }
+        // ── Jornadas por turno ───────────────────────────────────────────────────────
+        // El biométrico solo da horas sueltas (no dice si es entrada o salida). Se agrupan según el turno:
+        // la primera marcación abre la jornada y las que caen dentro de [duración del turno + tolerancia]
+        // pertenecen a ella; la última es la salida. Así un turno nocturno (19:00 a 07:00) cruza la medianoche.
+        $turnoNombre = null; $idTurno = 0; $dur = null; $jornadas = [];
+        try {
+            $t = $db->query('SELECT e.id_turno, mt.valor AS turno FROM empleados e LEFT JOIN multicatalogo mt ON mt.id = e.id_turno WHERE e.id = ?', [$id])->getRowArray();
+            $idTurno = (int)($t['id_turno'] ?? 0); $turnoNombre = $t['turno'] ?? null;
+            $dur = $idTurno ? \App\Libraries\TurnosLibrary::duracionHoras($idTurno) : null;
+
+            $tz = new \DateTimeZone('America/Mexico_City');
+            $ahora = new \DateTime('now', $tz);
+            $desde = (clone $ahora)->modify('-14 days')->format('Y-m-d');
+            $raw = $db->query('SELECT fecha, hora FROM biometrico_logs WHERE id_empleado = ? AND fecha >= ? ORDER BY fecha, hora LIMIT 600', [$id, $desde])->getResultArray();
+
+            // Se ignoran dobles toques (menos de 3 min entre uno y otro)
+            $marc = [];
+            foreach ($raw as $r) {
+                $d = new \DateTime($r['fecha'] . ' ' . $r['hora'], $tz);
+                if ($marc && ($d->getTimestamp() - end($marc)->getTimestamp()) < 180) continue;
+                $marc[] = $d;
+            }
+            $durH   = $dur ?: 12.0;
+            $gracia = 240; // minutos de tolerancia después de cumplir el turno (igual que el cierre automático)
+            $n = count($marc); $i = 0;
+            while ($i < $n) {
+                $t0 = $marc[$i];
+                $limite = (clone $t0)->modify('+' . (int)round($durH * 60 + $gracia) . ' minutes');
+                $ultM = $t0; $j = $i + 1; $cuenta = 1;
+                while ($j < $n && $marc[$j] <= $limite) { $ultM = $marc[$j]; $cuenta++; $j++; }
+                $i = $j;
+
+                $salida   = ($cuenta >= 2 && ($ultM->getTimestamp() - $t0->getTimestamp()) >= 1800) ? $ultM : null;
+                $esperada = (clone $t0)->modify('+' . (int)round($durH * 60) . ' minutes');
+                $estado   = $salida ? 'completa' : ($ahora < (clone $esperada)->modify("+{$gracia} minutes") ? 'en_turno' : 'sin_salida');
+                $antic    = ($salida && $dur && $salida < (clone $esperada)->modify('-15 minutes'))
+                    ? (int)round(($esperada->getTimestamp() - $salida->getTimestamp()) / 60) : null;
+                $jornadas[] = [
+                    'entrada' => $t0->format('Y-m-d H:i:s'), 'salida' => $salida ? $salida->format('Y-m-d H:i:s') : null,
+                    'esperada' => $dur ? $esperada->format('Y-m-d H:i:s') : null,
+                    'marcaciones' => $cuenta, 'estado' => $estado, 'anticipada_min' => $antic,
+                    'horas' => $salida ? round(($salida->getTimestamp() - $t0->getTimestamp()) / 3600, 1) : null,
+                ];
+            }
+            $jornadas = array_slice(array_reverse($jornadas), 0, 6);
+        } catch (\Throwable $e) {
+            log_message('error', 'Jornadas biométrico: ' . $e->getMessage());
+        }
+
+        return $this->respond(['status' => 'ok', 'data' => [
+            'disponible' => true, 'hoy' => (int)($tot['hoy'] ?? 0), 'total' => (int)($tot['total'] ?? 0), 'ultimas' => $ult,
+            'turno' => $turnoNombre, 'duracion_horas' => $dur, 'jornadas' => $jornadas,
+        ]]);
+    }
+
     public function marcaciones()
     {
         if (!$this->admin()) return $this->err('Sin permiso', 403);
